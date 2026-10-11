@@ -1,0 +1,12 @@
+{
+  "claude_command": "claude",
+  "permission_mode": "auto",
+  "max_runs": 20,
+  "accounts": [
+    {"name": "account-1", "email": "", "config_dir": "profile/account-1", "threshold_percent": 95, "usage_command": null},
+    {"name": "account-2", "email": "", "config_dir": "profile/account-2", "threshold_percent": 95, "usage_command": null},
+    {"name": "account-3", "email": "", "config_dir": "profile/account-3", "threshold_percent": 95, "usage_command": null},
+    {"name": "account-4", "email": "", "config_dir": "profile/account-4", "threshold_percent": 95, "usage_command": null},
+    {"name": "account-5", "email": "", "config_dir": "profile/account-5", "threshold_percent": 95, "usage_command": null}
+  ]
+}
