@@ -2,6 +2,24 @@
 
 For the dashboard setup, start with the [README](../README.md).
 
+## Update an existing installation
+
+1. Finish or pause any guided task. Turn off automatic switching in the dashboard, then close the dashboard launcher.
+2. Open a terminal in the existing Switchboard project folder and run:
+
+   ```sh
+   git pull --ff-only
+   uv sync
+   uv run launch.py
+   ```
+
+   On native Windows, use `uv sync --python 3.14` for the install step.
+
+3. Check the account route, then turn automatic switching back on. Linux needs an unlocked desktop credential store; Windows needs the same signed-in user.
+4. Confirm that the session usage reading updates. Follow the [background and startup checks](testing.md#4-test-fallback-and-background-operation) before relying on the monitor.
+
+Updating in the same folder keeps your local configuration and profiles. Do not delete them or copy credentials into Git. If Git reports local source changes, review those changes before updating; do not discard them to force the update. Continue using port **56729**.
+
 ## Account profiles
 
 `rotator.json` is your local configuration. Create it with `uv run rotator.py init`. It starts with five profiles; the dashboard can add or remove accounts.
@@ -34,7 +52,15 @@ uv run shared_mode.py disable
 
 `setup` imports signed-in profiles into the protected OS credential store. Turn switching off before preparing accounts again. `enable` installs a background monitor and a Claude `StopFailure` hook in `~/.claude/settings.json`, preserving existing hooks and saving a settings backup in `.shared-rotator/`. New Claude chats load the hook. `disable` removes the monitor and Switchboard's hook; the current shared login stays in place.
 
-The monitor uses a macOS launch agent, a Linux systemd user service, or a Windows Task Scheduler task for the current interactive user. It requests no administrator elevation. Linux Secret Service must be available in that user's D-Bus session. Windows hooks use explicitly quoted PowerShell commands; macOS and Linux use the system shell.
+The monitor uses a macOS LaunchAgent, a Linux systemd user service, or a Windows Task Scheduler task for the current interactive user. It requests no administrator elevation. Linux Secret Service must be available in that user's D-Bus session. Windows hooks use explicitly quoted PowerShell commands; macOS and Linux use the system shell.
+
+The platform improvements are merged into `main`; see [availability and verification](platform-support.md#current-availability). Background behavior:
+
+- **Linux:** import only current desktop session variables into the systemd manager, keep those addresses out of the unit file, use `Type=exec`, confirm the service is active before enabling startup, and stop its full process group when disabled.
+- **Windows:** stop an older scheduled monitor before replacement, check its numeric running state through Task Scheduler, and keep descendants in a private kill-on-close job object. The job contains monitor descendants, not your existing Claude terminals.
+- **macOS:** check the macOS 13 minimum before launch and Claude resolution; test actual LaunchAgent replacement and removal on older/Intel runners.
+
+The generated service/task names depend on the resolved configuration path. Moving the application or replacing its Python environment can invalidate a registered monitor. Turn switching off before moving it. In the new location, run `uv sync`, sign in and prepare accounts again, then enable switching. Reopening the launcher refreshes the monitor registration when switching is enabled. Sign in separately on each machine instead of copying credential/profile folders.
 
 The monitor reads only the active account's current session percentage. Checks use a short-lived Claude session in safe mode and send `/usage`, without a model prompt. The terminal display is rendered with pyte so a refreshed percentage replaces earlier text. The reader waits for refreshing to finish and verifies the shared login before switching. It does not depend on Claude's local usage cache, which can remain stale. Claude's display format can change.
 
@@ -85,7 +111,9 @@ uv run --group tests python -B -m unittest discover -s tests -v
 node --check ui/app.js
 ```
 
-Tests simulate Claude; they do not contact Anthropic or use your accounts. They exercise real terminal I/O and file locks, and create/remove disposable Windows credential entries when run on Windows. GitHub Actions runs the suite on macOS, Ubuntu, and Windows with Python 3.9 and 3.14.
+Tests use fake Claude responses and disposable data; they do not contact Anthropic or switch your accounts. Native platform probes do create and remove temporary credential entries, tasks, or services. The opt-in flags, exact verified revisions, CI matrix, and remaining desktop checks are documented in the [testing guide](testing.md#run-the-automated-tests).
+
+Create a separate feature branch and PR for each change. Commit source and documentation only. Do not add `rotator.json`, profile folders, `.shared-rotator/`, credentials, `.env`, or logs.
 
 The optional `tests` dependency group installs PyPA distlib only on Windows to generate real executable test launchers. Batch-file stubs cannot preserve all Claude arguments, especially multiline prompts; runtime installations do not need this test dependency.
 

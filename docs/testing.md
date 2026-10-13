@@ -2,22 +2,36 @@
 
 Use the checks below on each operating system. Start through its launcher and keep the dashboard on port **56729**. Follow [platform setup](platform-support.md) first.
 
-## Verified on October 13, 2026
+## Verified platform checks
 
-- A real background check read the current session percentage from Claude's rendered `/usage` screen. At 10% usage and a saved 10% threshold, it switched from account-5 to account-1. Claude's shared account identity was verified after the switch.
-- A rejected account-6 login was skipped. That account needs a fresh sign-in and preparation before it can rejoin rotation.
-- Disposable Keychain values of 524, 9,380, and 20,000 characters were written, read back exactly, updated, and removed. All six prepared credentials were checked for complete, readable JSON; this does not prove all six refresh tokens are still accepted by Claude.
-- Before the platform extension, all 32 automated tests passed on macOS with Python 3.9 and 3.14, and in isolated Ubuntu 22.04 with Python 3.10. Those Ubuntu checks simulated credentials and Claude.
+**Evidence recorded October 13, 2026.** The three platform PRs are merged into `main`. The combined revision `cc21d12` passed all nine CI jobs. Each link below identifies the tested revision; the earlier feature runs show the individual changes.
 
-The two-terminal chat continuation check below, native Windows, and older macOS hardware remain unverified.
+| Code tested | Revision | CI result | What it adds |
+| --- | --- | --- | --- |
+| Before platform improvements | `33b31a9` | [6 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38385324784) | Ubuntu, macOS, and Windows on Python 3.9 and 3.14; native terminal and lock tests; Windows credential store, private folders, and task registration |
+| Ubuntu/Linux PR #1 | `263dfbf` | [7 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38388065937) | Real disposable systemd user service startup, replacement, and complete process cleanup on Ubuntu 22.04 |
+| Windows PR #2 | `e8292fd` | [6 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38388300818) | Real scheduled-task execution and child cleanup after task termination; terminal reading inside the monitor's job object |
+| macOS PR #3 | `0c34482` | [8 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38388381966) | Real LaunchAgent startup, replacement, and stop; macOS 14 / Python 3.9 and macOS 15 Intel / Python 3.14 |
+| Merged `main` | `cc21d12` | [9 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38392172818) | All three improvements together, including the separate Ubuntu 22.04 service job and older/Intel Mac runners |
 
-## Cross-platform extension checks
+The three PRs also combined without merge conflicts. A disposable combined source snapshot ran 55 tests on the development Mac: **50 passed and 5 platform-specific checks were skipped**. This local integration check preceded the passing merged-main CI run linked above.
 
-The [native platform test run](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38384581089) passed all six jobs: Ubuntu, macOS, and Windows on Python 3.9 and 3.14. Windows checks exercised real terminal redraws, device-local Credential Manager storage, private-folder ACLs, and password-free Task Scheduler registration. The tests used disposable data and a fake Claude screen.
+Additional checks:
 
-Separately, an isolated Ubuntu 22.04 container verified real GNOME Keyring roundtrips at 524, 9,380, and 20,000 characters and validated the generated user-service file with systemd. It did not mount any user account profiles. The updated macOS monitor continued reporting live Claude session usage on port 56729.
+- A live Claude `/usage` check on the development Mac reached a saved 10% threshold, switched accounts, and verified the new shared login identity. Existing-chat adoption was not checked in that run.
+- Disposable macOS Keychain and isolated Ubuntu GNOME Keyring roundtrips verified values of 524, 9,380, and 20,000 characters, including update and deletion. The Linux container did not mount user profiles.
+- Feature commits excluded profiles, credentials, private state, and `.env` files. Secret scans and GitHub security checks passed. This does not replace the desktop checks below.
 
-Real Claude account switching and sign-in startup on Linux/Windows, WSL, and older macOS hardware still need the desktop checks below. Passing native component checks does not complete those checks.
+### Remaining desktop checks
+
+| Check | Where it remains unverified |
+| --- | --- |
+| Existing chats adopt the new login and can continue | Two-terminal test on every target platform |
+| Real Claude sign-in and automatic switching | Linux, Windows, and older/Intel Mac hardware |
+| Monitor and credential store work after signing out and in | Each target desktop OS |
+| Actual hardware/version support | macOS 13, Windows ARM64, other Linux distributions, and WSL |
+
+Passing tests with a fake Claude screen or harmless background process does not verify these behaviors. macOS 12 and earlier are outside current Claude Code's supported OS range.
 
 ## 1. Check the dashboard
 
@@ -48,7 +62,9 @@ This test changes the shared account used by your local Claude terminals. Choose
 
 Open **Name and settings** and confirm that an account's percentage can be saved and survives a refresh. Restore your preferred value after testing.
 
-During normal work, watch the session usage approach that account's threshold. When the observed percentage reaches it, the monitor should switch to the next available account and record **Session threshold** in the recent switches. Do not consume quota just to force this test.
+During normal work, watch the session usage approach that account's threshold. When a monitor check observes usage at or above it, the monitor should switch to the next available account and record **Session threshold** in recent switches. Allow about a minute for the next reading and switch.
+
+To test without spending extra quota, if current usage is already above 0%, temporarily set the current account's threshold below that observed value. Keep the next account at its normal threshold. Restore the original setting immediately after the switch. Do not consume quota just to force a test.
 
 The automated tests also simulate a 96% reading against a 95% threshold and verify rotation. That verifies the switching logic, while the live check verifies Claude's real usage display and login behavior.
 
@@ -56,9 +72,19 @@ The automated tests also simulate a 96% reading against a 95% threshold and veri
 
 - Turn **Switch at a reported limit too** off and back on. Refresh the page after each change and confirm the setting was saved.
 - With fallback on, a real Claude rate-limit error should switch accounts when one is available. Retry the interrupted message after the switch.
-- Close the launcher, keep using your Claude terminals, then reopen Switchboard. The background monitor should still be active and report a recent session reading.
+- Close the dashboard launcher while switching is on. Before reopening it, run `uv run shared_mode.py status` from the project folder twice, at least a minute apart. `session_usage.checked_at` should advance and its account should match the current login. Record any usage error. Then reopen Switchboard. Checking before reopening matters because the launcher can restart an enabled monitor.
 
 Automated tests simulate the rate-limit event and verify that disabling fallback prevents that event from switching accounts. No real quota needs to be exhausted for this check.
+
+### Check startup after signing in again
+
+1. Save your work and leave automatic switching on. Record the current account and usage reading.
+2. Sign out of the OS and sign back in as the same user. On Linux/macOS, unlock the credential store if asked.
+3. Before opening Switchboard, open a terminal in its project folder and run `uv run shared_mode.py status` twice, about a minute apart. Allow up to two minutes for the first usage check.
+4. Confirm `session_usage.checked_at` advances without launching the dashboard and note any error.
+5. Open Switchboard and confirm its state matches. Repeat a short Claude message and the two-terminal check if needed.
+
+**Pass:** the monitor reads usage after sign-in without being started by the dashboard, the credential store is usable, and real Claude requests succeed. Record OS version, processor, and any approval prompts; do not describe this check as passed based only on a task or service being registered.
 
 ## 5. Check account controls
 
@@ -78,8 +104,20 @@ uv run --group tests python -B -m unittest discover -s tests -v
 node --check ui/app.js
 ```
 
-These tests simulate Claude and saved credentials. They do not switch your real accounts.
+The suite uses fake Claude responses and disposable credentials, not your accounts. Native Windows checks write and delete test Credential Manager entries; on native Windows, they also run a harmless scheduled task and test process cleanup.
 
-The extended suite also exercises real terminal redraws and file-lock contention. On native Windows it writes, reads, and deletes disposable Credential Manager entries. GitHub Actions runs it on Ubuntu, macOS, and Windows with Python 3.9 and 3.14. Linux's real GNOME Keyring is checked separately in an isolated Ubuntu container, without mounting account profiles.
+On macOS, the LaunchAgent test is opt-in outside CI. It creates and removes a unique disposable agent:
 
-For Linux, also close the launcher and verify the systemd user service continues updating usage. For Windows, repeat after signing out and back in to verify Task Scheduler startup. For older supported macOS, repeat with that OS version and processor; tests on the current Mac do not establish older-version compatibility.
+```sh
+SWITCHBOARD_TEST_LAUNCHD=1 uv run --group tests python -B -m unittest discover -s tests -p test_macos_agent.py -v
+```
+
+On Linux, run the service test only inside a working systemd user session. It creates and removes a unique disposable service:
+
+```sh
+SWITCHBOARD_TEST_SYSTEMD=1 uv run --group tests python -B -m unittest discover -s tests -p test_linux_service.py -v
+```
+
+Both tests are included in merged `main`. Do not opt in from a machine without the matching OS session. Normal test runs skip them unless enabled. CI enables the Mac probe on Mac runners and uses a separate Ubuntu 22.04 service job for Linux.
+
+CI runs Ubuntu, macOS, and Windows on Python 3.9 and 3.14, plus macOS 14 / Python 3.9, macOS 15 Intel / Python 3.14, and a separate Ubuntu 22.04 systemd service job. Real GNOME Keyring was checked separately in an isolated Ubuntu container. Repeat the desktop checklist on each actual machine; successful component tests do not establish live account switching or login startup.
