@@ -8,9 +8,10 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 
-from platform_runtime import RotatorError
+from platform_runtime import RotatorError, powershell_env
 
 
 def identity(config_path: Path) -> str:
@@ -66,10 +67,29 @@ def install(config_path: Path, state_dir: Path, script: Path) -> None:
         path = state_dir / "monitor-task.xml"
         path.write_bytes(task)
         error = "Cannot register the background monitor. Allow your user account to create a Task Scheduler task, then retry."
+        # IgnoreNew would otherwise leave the previous interpreter running after an app update.
+        subprocess.run(["schtasks", "/End", "/TN", identity(config_path)], capture_output=True, timeout=20, check=False)
         run_checked(["schtasks", "/Create", "/TN", identity(config_path), "/XML", str(path), "/F"], error)
         run_checked(["schtasks", "/Run", "/TN", identity(config_path)], error)
+        wait_windows_task(identity(config_path))
     else:
         raise RotatorError("No background monitor is available on this operating system")
+
+
+def wait_windows_task(name: str) -> None:
+    # COM exposes a numeric state, unlike schtasks' localized text output.
+    script = ("$ErrorActionPreference = 'Stop'; $s = New-Object -ComObject Schedule.Service; $s.Connect(); "
+              "$t = $s.GetFolder('\\').GetTask($env:SWITCHBOARD_TASK_NAME); "
+              "if ($t.State -eq 4) { exit 0 }; exit 1")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", script],
+                                env=dict(powershell_env(), SWITCHBOARD_TASK_NAME=name),
+                                capture_output=True, timeout=5, check=False)
+        if result.returncode == 0:
+            return
+        time.sleep(0.25)
+    raise RotatorError("The Windows monitor did not start. Sign in to Windows as the same user running Switchboard, then turn switching on again.")
 
 
 def windows_task(argv: list[str]) -> bytes:
