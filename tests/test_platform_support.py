@@ -266,14 +266,19 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, "Private-folder ACL did not restrict access to the expected principals")
 
     @unittest.skipUnless(sys.platform == "win32", "Requires native Windows Task Scheduler")
-    def test_native_windows_task_xml_can_register_without_a_password(self):
+    def test_native_windows_task_runs_and_cleans_children_without_a_password(self):
         import uuid
         name = "switchboard-test-" + uuid.uuid4().hex
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "task.xml"
             marker = Path(root) / "started.txt"
             probe = Path(root) / "harmless probe.py"
-            probe.write_text("from pathlib import Path; import time; " + f"Path({str(marker)!r}).write_text('ready'); time.sleep(120)", encoding="utf-8")
+            probe.write_text(
+                "from pathlib import Path; import sys,subprocess,time; "
+                + f"sys.path.insert(0, {str(Path(platform_runtime.__file__).parent)!r}); "
+                + "from platform_runtime import windows_monitor_job; windows_monitor_job(); "
+                + "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(180)']); "
+                + f"Path({str(marker)!r}).write_text(str(child.pid)); time.sleep(120)", encoding="utf-8")
             path.write_bytes(background_monitor.windows_task([sys.executable, str(probe)]))
             try:
                 result = subprocess.run(["schtasks", "/Create", "/TN", name, "/XML", str(path), "/F"],
@@ -285,6 +290,20 @@ class PlatformTests(unittest.TestCase):
                 while not marker.exists() and time.monotonic() < deadline:
                     time.sleep(0.1)
                 self.assertTrue(marker.exists(), "Task Scheduler did not execute the harmless monitor")
+                import ctypes
+                from ctypes import wintypes
+                kernel = ctypes.WinDLL("kernel32")
+                kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+                kernel.OpenProcess.restype = wintypes.HANDLE
+                kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+                kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                handle = kernel.OpenProcess(0x100000, False, int(marker.read_text()))
+                self.assertTrue(handle)
+                try:
+                    background_monitor.run_checked(["schtasks", "/End", "/TN", name], "Cannot stop disposable task")
+                    self.assertEqual(kernel.WaitForSingleObject(handle, 5000), 0, "Stopping the task left a usage child alive")
+                finally:
+                    kernel.CloseHandle(handle)
             finally:
                 subprocess.run(["schtasks", "/End", "/TN", name], capture_output=True, timeout=20)
                 subprocess.run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True, timeout=20)
