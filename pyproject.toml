@@ -2,4 +2,6 @@
 name = "claude-account-rotator"
 version = "0.1.0"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+    "pyte>=0.8.2,<0.9",
+]

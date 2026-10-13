@@ -137,7 +137,8 @@ class DashboardTests(unittest.TestCase):
                                           "identities": {"account-1": "one@example.com|org1",
                                                          "account-2": "two@example.com|org2",
                                                          "account-3": "three@example.com|org3"},
-                                          "limited": {}, "history": [], "last_error": None}))
+                                          "limited": {}, "history": [{"from": "account-3", "to": "account-1", "reason": "6% usage", "at": time.time()}],
+                                          "login_errors": {"account-3": "Saved login rejected"}, "last_error": None}))
         with patch.object(rotator_ui, "STATE_FILE", state_file), \
              patch.object(rotator_ui, "shared_lock"), \
              patch.object(rotator_ui, "vault_delete") as delete_vault:
@@ -146,12 +147,15 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(info["organization_id"], "org3")
             self.assertTrue(info["connected_since"])
             self.assertIsNone(info["last_login_at"])
+            self.assertEqual(info["login_error"], "Saved login rejected")
+            self.assertTrue(any("session threshold" in event["message"] for event in info["events"]))
             self.dashboard.remove_account("account-3")
             self.assertFalse(self.dashboard.account_info("account-3")["signed_in"])
             self.assertIsNotNone(self.dashboard.account_info("account-3")["last_logout_at"])
             self.assertNotIn("account-3", json.loads(state_file.read_text())["identities"])
+            self.assertNotIn("account-3", json.loads(state_file.read_text())["login_errors"])
             self.assertEqual(len(json.loads(self.config.read_text())["accounts"]), 3)
-            self.assertEqual(delete_vault.call_count, 2)
+            self.assertEqual(delete_vault.call_count, 3)
 
     def test_delete_account_keeps_profile_folder(self):
         self.dashboard.add_account("account-2", "", "Second seat")

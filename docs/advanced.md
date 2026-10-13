@@ -34,9 +34,11 @@ uv run shared_mode.py disable
 
 `setup` imports signed-in profiles into macOS Keychain. Turn switching off before preparing accounts again. `enable` installs a background monitor and a Claude `StopFailure` hook in `~/.claude/settings.json`, preserving existing hooks and saving a settings backup in `.shared-rotator/`. New Claude chats load the hook. `disable` removes the monitor and Switchboard's hook; the current shared login stays in place.
 
-The monitor reads only the active account's current session percentage. Checks use a short-lived Claude session in safe mode and send `/usage`, without a model prompt. Readings must belong to the current login and be no more than 60 seconds old. The percentage comes from Claude's local cache after opening the usage display; this internal format can change.
+The monitor reads only the active account's current session percentage. Checks use a short-lived Claude session in safe mode and send `/usage`, without a model prompt. The terminal display is rendered with pyte so a refreshed percentage replaces earlier text. The reader waits for refreshing to finish and verifies the shared login before switching. It does not depend on Claude's local usage cache, which can remain stale. Claude's display format can change.
 
 The failure hook runs after a failed turn. It switches on a reported rate limit when fallback is enabled, but cannot replay the failed message. Events from concurrent terminals are serialized, and near-simultaneous limit events are treated as one switch. The target email and organization are verified before recording success.
+
+If Claude rejects a saved login, that account is marked **Needs sign-in** and skipped on subsequent automatic checks. Turn switching off, sign in again to that profile, update prepared accounts, then turn switching on. If no prepared account is available, the current login stays in place and the dashboard explains what needs attention.
 
 Claude cloud sessions are not controlled. Account-linked Remote Control connections may need to reconnect after a switch. Terminal chats using a separate `CLAUDE_CONFIG_DIR`, an API key, or a fixed `CLAUDE_CODE_OAUTH_TOKEN` do not follow the shared login.
 
@@ -46,7 +48,7 @@ For older saved Keychain items only:
 uv run shared_mode.py migrate
 ```
 
-This moves credentials to items owned by Apple's signed Keychain utility and removes obsolete copies. The old Swift helper may require Xcode command line tools during migration. Normal switches use the signed utility, with credential data passed through standard input and output rather than command arguments.
+This repairs older saved credentials, moves them to items owned by Apple's signed Keychain utility, and removes obsolete copies. Long credentials are split into small Keychain items, verified after writing, and checked against a checksum when read. The old Swift helper may require Xcode command line tools during migration. Normal switches use the signed utility, with credential data passed through standard input and output rather than command arguments.
 
 ## Guided tasks — macOS or Linux
 
@@ -73,7 +75,7 @@ The command must print a number from 0 to 100, or JSON such as `{"used_percent":
 
 ## Development
 
-Python 3.9 or newer is required and managed by uv. There are no third-party Python dependencies.
+Python 3.9 or newer is required and managed by uv. `uv sync` installs pyte and its terminal text dependency.
 
 ```sh
 uv sync

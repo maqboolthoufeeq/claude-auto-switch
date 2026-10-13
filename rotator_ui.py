@@ -31,7 +31,7 @@ from rotator import (
     profile_env,
     state_paths,
 )
-from shared_mode import STATE_FILE, old_vault_service, shared_env, shared_lock, state_read, state_save, vault_delete, vault_service
+from shared_mode import STATE_FILE, old_vault_service, previous_vault_service, shared_env, shared_lock, state_read, state_save, vault_delete, vault_service
 
 
 ASSETS = {
@@ -264,11 +264,12 @@ class Dashboard:
             "enabled": bool(state.get("enabled")),
             "current": state.get("current"),
             "last_error": state.get("last_error"),
+            "login_errors": state.get("login_errors", {}),
             "history": state.get("history", [])[-10:],
             "early_usage_check": True,
             "fallback_on_limit": state.get("fallback_on_limit", True),
             "session_usage": state.get("session_usage"),
-            "needs_keychain_update": bool(identities) and state.get("vault_version") != 3,
+            "needs_keychain_update": bool(identities) and state.get("vault_version") != 4,
             "old_keychain_cleanup_pending": state.get("old_vault_cleanup_pending", []),
             "accounts": [{"name": a.name, "display_name": a.display_name,
                           "prepared": a.name in identities}
@@ -305,7 +306,7 @@ class Dashboard:
             except (KeyError, TypeError, ValueError, OverflowError):
                 continue
             direction = "Switched into this account" if event.get("to") == name else "Switched away from this account"
-            reason = " after a usage limit" if event.get("reason") == "rate_limit" else " manually"
+            reason = " after a usage limit" if event.get("reason") == "rate_limit" else " at the session threshold" if "% usage" in str(event.get("reason")) else " manually"
             events.append({"at": when, "kind": "switch", "message": direction + reason})
         events = sorted((event for event in events if isinstance(event, dict)),
                         key=lambda event: str(event.get("at", "")), reverse=True)[:12]
@@ -316,6 +317,7 @@ class Dashboard:
             "organization_id": org_id or None,
             "profile_dir": str(account.config_dir),
             "signed_in": status["signed_in"],
+            "login_error": state.get("login_errors", {}).get(name),
             "status": status["status"],
             "prepared": name in identities,
             "current": state.get("current") == name,
@@ -372,6 +374,7 @@ class Dashboard:
                 if name in identities:
                     vault_delete(vault_service(self.config_path, account))
                     vault_delete(old_vault_service(self.config_path, account))
+                    vault_delete(previous_vault_service(self.config_path, account))
                     identities.pop(name, None)
                     state["identities"] = identities
                     pending = state.get("old_vault_cleanup_pending", [])
@@ -380,6 +383,7 @@ class Dashboard:
                     limited = state.get("limited", {})
                     if isinstance(limited, dict):
                         limited.pop(name, None)
+                    state.get("login_errors", {}).pop(name, None)
                     if current:
                         state["current"] = None
                     if delete and isinstance(state.get("history"), list):

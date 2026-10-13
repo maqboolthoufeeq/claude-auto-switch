@@ -65,7 +65,7 @@ Turn off automatic switching, then open **Run a guided task**. Choose your proje
 - Saved switching credentials live in **macOS Keychain**. Profiles, configuration, private dashboard links, and logs are excluded from Git.
 - The dashboard runs locally and requires its private launcher link. Opening `ui/index.html` directly does not connect it.
 - Terminal chats must use the default Claude login. Separate profiles, API keys, and fixed OAuth tokens do not follow shared switching.
-- Changes to Claude's `/usage` display or local cache can make percentage checks unavailable. Keep the limit fallback enabled if you want switching to continue at reported limits.
+- Changes to Claude's `/usage` display can make percentage checks unavailable. Keep the limit fallback enabled if you want switching to continue at reported limits.
 
 ## If something needs attention
 
@@ -80,3 +80,5 @@ Turn off automatic switching, then open **Run a guided task**. Choose your proje
 macOS may request Keychain approval again if the Keychain is locked or its permissions are reset.
 
 For terminal commands, custom usage checks, and development instructions, see the [advanced guide](docs/advanced.md).
+
+To check the software yourself, follow the [testing guide](docs/testing.md). See [platform support](docs/platform-support.md) for current status and the Linux, Windows, and older macOS targets.

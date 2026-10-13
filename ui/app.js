@@ -77,16 +77,17 @@ function renderRoute() {
   const route = $("route");
   route.replaceChildren(...accounts.map((account, index) => {
     const current = sharedInfo?.current === account.name;
-    const stop = node("button", "route-stop" + (account.signed_in ? " connected" : " disconnected") + (current ? " current" : ""));
+    const connected = account.signed_in && !sharedInfo?.login_errors?.[account.name];
+    const stop = node("button", "route-stop" + (connected ? " connected" : " disconnected") + (current ? " current" : ""));
     stop.type = "button";
     stop.title = "View " + account.display_name + " details";
-    stop.setAttribute("aria-label", "View " + account.display_name + " details, " + (account.signed_in ? "connected" : "needs sign-in") + (current ? ", current shared login" : ""));
+    stop.setAttribute("aria-label", "View " + account.display_name + " details, " + (connected ? "connected" : "needs sign-in") + (current ? ", current shared login" : ""));
     stop.append(node("span", "route-dot", String(index + 1)), node("span", "route-name", account.display_name),
-      node("span", "route-status", current ? "Current" : account.signed_in ? "Connected" : "Sign in"));
+      node("span", "route-status", current ? "Current" : connected ? "Connected" : "Sign in"));
     stop.addEventListener("click", () => openAccountInfo(account.name));
     return stop;
   }));
-  const count = accounts.filter((account) => account.signed_in).length;
+  const count = accounts.filter((account) => account.signed_in && !sharedInfo?.login_errors?.[account.name]).length;
   $("route-count").textContent = accountsLoaded ? count + " of " + accounts.length + " connected" : "Checking accounts…";
   const current = accounts.find((account) => account.name === sharedInfo?.current);
   $("hero-summary").textContent = current
@@ -96,6 +97,7 @@ function renderRoute() {
 
 function makeAccountRow(account, index) {
   const accountPrepared = Boolean(sharedInfo?.accounts?.find((item) => item.name === account.name)?.prepared);
+  const loginError = sharedInfo?.login_errors?.[account.name];
   const row = node("article", "account-row");
   if (sharedInfo?.current === account.name) row.classList.add("current");
   const top = node("div", "account-top");
@@ -103,7 +105,7 @@ function makeAccountRow(account, index) {
   const identity = node("div", "account-identity");
   identity.append(node("strong", "", account.display_name));
   if (account.display_name !== account.name) identity.append(node("small", "", account.name));
-  const status = node("span", "account-status" + (account.signed_in ? "" : " out"), account.signed_in ? "Connected" : "Needs sign-in");
+  const status = node("span", "account-status" + (account.signed_in && !loginError ? "" : " out"), account.signed_in && !loginError ? "Connected" : "Needs sign-in");
   const info = node("button", "info-button", "i");
   info.type = "button";
   info.setAttribute("aria-label", "Information about " + account.display_name);
@@ -114,7 +116,7 @@ function makeAccountRow(account, index) {
   row.append(top);
 
   const bottom = node("div", "account-bottom");
-  const usage = node("span", "account-usage", accountPrepared ? "In rotation · " + (account.early_usage_check ? "switch at " + account.threshold_percent + "%" : "switch at limit") : "Not in rotation");
+  const usage = node("span", "account-usage", loginError ? "Saved login rejected · sign in and prepare again" : accountPrepared ? "In rotation · " + (account.early_usage_check ? "switch at " + account.threshold_percent + "%" : "switch at limit") : "Not in rotation");
   const login = node("button", "account-link", account.signed_in ? "Sign in again" : "Sign in");
   login.type = "button";
   login.addEventListener("click", async () => {
@@ -201,11 +203,11 @@ function makeAccountRow(account, index) {
 }
 
 function renderAccounts() {
-  const key = JSON.stringify([accountsLoaded, accounts, sharedInfo?.current, sharedInfo?.accounts?.map((account) => [account.name, account.prepared])]);
+  const key = JSON.stringify([accountsLoaded, accounts, sharedInfo?.current, sharedInfo?.login_errors, sharedInfo?.accounts?.map((account) => [account.name, account.prepared])]);
   if (key === accountRenderKey) return;
   accountRenderKey = key;
   $("accounts").replaceChildren(...accounts.map(makeAccountRow));
-  const ready = sharedInfo?.accounts?.filter((account) => account.prepared).length || 0;
+  const ready = sharedInfo?.accounts?.filter((account) => account.prepared && !sharedInfo?.login_errors?.[account.name]).length || 0;
   const signed = accounts.filter((account) => account.signed_in).length;
   $("signed-count").textContent = !accountsLoaded ? "Checking…" : sharedInfo && !sharedUnavailable
     ? ready + " ready"
@@ -224,9 +226,9 @@ function formatDate(value) {
 function renderAccountInfo(info) {
   $("account-dialog-error").hidden = true;
   $("account-dialog-title").textContent = info.display_name;
-  $("account-dialog-status").textContent = info.signed_in
+  $("account-dialog-status").textContent = info.login_error ? "Saved login rejected. Sign in again, then update prepared accounts." : info.signed_in
     ? "Connected to Claude Code" : "This profile needs a Claude sign-in";
-  $("account-dialog-status").className = "dialog-status" + (info.signed_in ? "" : " out");
+  $("account-dialog-status").className = "dialog-status" + (info.signed_in && !info.login_error ? "" : " out");
   const facts = [
     ["Profile ID", info.name],
     ["Email (if known)", info.email || "Not available"],
@@ -373,7 +375,9 @@ function renderShared() {
     : recentUsage && Number.isFinite(usage.percent) ? `Current session: ${usage.percent}% used · switch at ${threshold}%`
       : recentUsage && usage.error ? "Session percentage unavailable. " + (data?.fallback_on_limit !== false ? "Limit fallback is on." : "Limit fallback is off.")
         : "Checking the current session percentage…";
-  $("shared-usage-note").textContent = "Only current session usage is checked. Weekly usage is not used for switching.";
+  $("shared-usage-note").textContent = isEnabled && recentUsage && usage.error
+    ? usage.error
+    : "Only current session usage is checked. Weekly usage is not used for switching.";
   $("fallback-toggle").checked = data?.fallback_on_limit !== false;
   $("fallback-toggle").disabled = unavailable || !prepared || Boolean(taskInfo?.busy);
   $("shared-prepare").hidden = unavailable || (prepared && isEnabled);

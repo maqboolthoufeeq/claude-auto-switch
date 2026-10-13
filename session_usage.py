@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import fcntl
-import json
 import os
-from pathlib import Path
 import pty
 import re
 import select
@@ -14,6 +12,7 @@ import struct
 import subprocess
 import termios
 import time
+import pyte
 
 from rotator import BASE_DIR
 
@@ -33,28 +32,12 @@ def parse_session_usage(output: str) -> float | None:
     return value if 0 <= value <= 100 else None
 
 
-def cached_session_usage(path: Path, now: float) -> float | None:
-    """Accept only a recent session quota belonging to Claude's current login."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        cache = data["cachedUsageUtilization"]
-        identity = data["oauthAccount"]["accountUuid"]
-        age = now - float(cache["fetchedAtMs"]) / 1000
-        value = cache["utilization"]["five_hour"]["utilization"]
-        if (not identity or cache["accountUuid"] != identity or not 0 <= age <= 60
-                or isinstance(value, bool) or not isinstance(value, (int, float))):
-            return None
-        return float(value) if 0 <= value <= 100 else None
-    except (OSError, ValueError, TypeError, KeyError):
-        return None
-
-
 def read_session_usage(binary: str, env: dict[str, str], timeout: float = 35) -> tuple[float | None, str | None]:
     """Open a short-lived, safe-mode Claude TUI and ask its built-in /usage command."""
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 120, 120, 0, 0))
     clean_env = dict(env)
-    clean_env.update({"TERM": "xterm-256color", "COLUMNS": "120", "LINES": "40"})
+    clean_env.update({"TERM": "xterm-256color", "COLUMNS": "120", "LINES": "120"})
     try:
         process = subprocess.Popen(
             [binary, "--safe-mode", "--ax-screen-reader"], cwd=BASE_DIR, env=clean_env,
@@ -65,8 +48,10 @@ def read_session_usage(binary: str, env: dict[str, str], timeout: float = 35) ->
         os.close(slave)
         return None, f"Could not start Claude usage check: {exc}"
     os.close(slave)
-    output = ""
+    screen = pyte.Screen(120, 120)
+    stream = pyte.Stream(screen)
     requested = False
+    last_activity = time.monotonic()
     deadline = time.monotonic() + timeout
     try:
         while time.monotonic() < deadline:
@@ -78,18 +63,20 @@ def read_session_usage(binary: str, env: dict[str, str], timeout: float = 35) ->
                     break
                 if not chunk:
                     break
-                output = (output + chunk.decode("utf-8", errors="replace"))[-64000:]
-                clean = CSI.sub("", OSC.sub("", output)).replace("\r", "\n")
+                stream.feed(chunk.decode("utf-8", errors="replace"))
+                last_activity = time.monotonic()
+                clean = "\n".join(screen.display)
                 if any(prompt in clean for prompt in ("Permission Required:", "Choose the text style", "Enter y/n:")):
                     return None, "Claude needs a one-time interactive setup in the Switchboard project folder before session usage can be checked"
                 if not requested and "Claude Code v" in clean and "$" in clean:
                     os.write(master, b"/usage\r")
                     requested = True
-            if requested and parse_session_usage(output) is not None:
-                # The screen may initially show an older cached bar while refreshing.
-                fresh = cached_session_usage(Path.home() / ".claude.json", time.time())
-                if fresh is not None:
-                    return fresh, None
+            if requested:
+                rendered = "\n".join(screen.display)
+                percent = parse_session_usage(rendered)
+                if (percent is not None and "Refreshing" not in rendered
+                        and time.monotonic() - last_activity >= 0.75):
+                    return percent, None
             if process.poll() is not None:
                 break
         return None, "Claude did not provide a current-session usage percentage; switching at a confirmed limit remains available"

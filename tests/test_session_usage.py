@@ -1,9 +1,7 @@
-import json
-from pathlib import Path
-import tempfile
 import unittest
+import pyte
 
-from session_usage import cached_session_usage, parse_session_usage
+from session_usage import parse_session_usage
 
 
 class SessionUsageTests(unittest.TestCase):
@@ -23,15 +21,9 @@ class SessionUsageTests(unittest.TestCase):
         self.assertIsNone(parse_session_usage("Current session\n101% used"))
         self.assertIsNone(parse_session_usage("Current session\nUnavailable\nCurrent week\n95% used"))
 
-    def test_cache_requires_current_identity_recent_timestamp_and_session_quota(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "config.json"
-            value = {"oauthAccount": {"accountUuid": "test-account"}, "cachedUsageUtilization": {
-                "accountUuid": "test-account", "fetchedAtMs": 100000,
-                "utilization": {"five_hour": {"utilization": 94.5}, "seven_day": {"utilization": 99}}}}
-            path.write_text(json.dumps(value))
-            self.assertEqual(cached_session_usage(path, 110), 94.5)
-            self.assertIsNone(cached_session_usage(path, 161))
-            value["cachedUsageUtilization"]["accountUuid"] = "different-account"
-            path.write_text(json.dumps(value))
-            self.assertIsNone(cached_session_usage(path, 110))
+    def test_terminal_redraw_uses_new_session_percentage(self):
+        screen = pyte.Screen(120,120)
+        stream = pyte.Stream(screen)
+        stream.feed("Current session\r\n0% 0% used\r\nCurrent week\r\n90% used")
+        stream.feed("\x1b[2;1H\x1b[2K6% 6% used")
+        self.assertEqual(parse_session_usage("\n".join(screen.display)), 6)

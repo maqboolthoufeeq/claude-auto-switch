@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -59,6 +60,11 @@ def keychain_service(config_dir: Path | None) -> str:
 
 
 def vault_service(config_path: Path, account: Account) -> str:
+    scope = hashlib.sha256(str(config_path.resolve()).encode()).hexdigest()[:12]
+    return f"Switchboard-v4-{scope}-{account.name}"
+
+
+def previous_vault_service(config_path: Path, account: Account) -> str:
     scope = hashlib.sha256(str(config_path.resolve()).encode()).hexdigest()[:12]
     return f"Switchboard-v3-{scope}-{account.name}"
 
@@ -122,15 +128,57 @@ def keychain_helper_binary() -> Path:
     return binary
 
 
-def vault_read(service: str) -> str:
-    proc = subprocess.run(["/usr/bin/security", "find-generic-password", "-a", getpass.getuser(),
-                           "-s", service, "-w"], capture_output=True, timeout=30, check=False)
+def _keychain_item_read(service: str) -> bytes:
+    try:
+        proc = subprocess.run(["/usr/bin/security", "find-generic-password", "-a", getpass.getuser(),
+                               "-s", service, "-w"], capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RotatorError("Keychain access failed or timed out; unlock your Keychain and retry") from exc
     if proc.returncode != 0 or not proc.stdout:
         raise RotatorError(f"No readable Switchboard Keychain credential for {service}")
+    return proc.stdout.rstrip(b"\n")
+
+
+def _keychain_item_write(service: str, value: bytes) -> None:
+    # security's password prompt truncates at 128 characters; its command parser also has a line limit.
+    command = shlex.join(["add-generic-password", "-a", getpass.getuser(), "-s", service,
+                          "-U", "-w", value.decode("ascii")]) + "\n"
+    if len(command.encode()) > 900:
+        raise RotatorError("The saved login's service name is too long for Keychain storage")
     try:
-        return base64.b64decode(proc.stdout.strip(), validate=True).decode("utf-8")
+        proc = subprocess.run(["/usr/bin/security", "-i"], input=command.encode(),
+                              capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RotatorError("Keychain storage failed or timed out; unlock your Keychain and retry") from exc
+    if proc.returncode != 0 or _keychain_item_read(service) != value:
+        raise RotatorError("Keychain did not verify the complete saved item")
+
+
+def _vault_manifest(service: str) -> dict[str, Any]:
+    try:
+        value = json.loads(base64.b64decode(_keychain_item_read(service), validate=True))
+        if (not isinstance(value, dict) or value.get("v") != 4
+                or not isinstance(value.get("n"), int) or isinstance(value["n"], bool)
+                or not 1 <= value["n"] <= 1024
+                or not isinstance(value.get("g"), str) or len(value["g"]) != 16
+                or any(c not in "0123456789abcdef" for c in value["g"])
+                or not isinstance(value.get("h"), str) or len(value["h"]) != 64):
+            raise ValueError("Invalid saved credential manifest")
+        return value
+    except (ValueError, TypeError, KeyError, binascii.Error) as exc:
+        raise RotatorError("The saved credential index is damaged; prepare accounts again") from exc
+
+
+def vault_read(service: str) -> str:
+    value = _vault_manifest(service)
+    encoded = b"".join(_keychain_item_read(f"{service}-{value['g']}-{i}") for i in range(value["n"]))
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        if not secrets.compare_digest(hashlib.sha256(raw).hexdigest(), value["h"]):
+            raise ValueError("Saved credential checksum mismatch")
+        return raw.decode("utf-8")
     except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
-        raise RotatorError(f"Saved Keychain credential is damaged for {service}") from exc
+        raise RotatorError("The saved credential is incomplete; prepare accounts again") from exc
 
 
 def old_vault_read(service: str) -> str:
@@ -142,27 +190,86 @@ def old_vault_read(service: str) -> str:
     return proc.stdout.decode("utf-8")
 
 
-def vault_delete(service: str) -> None:
-    proc = subprocess.run(["/usr/bin/security", "delete-generic-password", "-a", getpass.getuser(),
-                           "-s", service], capture_output=True,
-                          timeout=30, check=False)
+def _keychain_item_delete(service: str) -> None:
+    try:
+        proc = subprocess.run(["/usr/bin/security", "delete-generic-password", "-a", getpass.getuser(),
+                               "-s", service], capture_output=True,
+                              timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RotatorError("Keychain removal failed or timed out; unlock your Keychain and retry") from exc
     if proc.returncode not in (0, 44):
         raise RotatorError(f"Could not remove saved Keychain credential for {service}")
 
 
 def keychain_write(service: str, secret: str) -> None:
     encoded = base64.b64encode(secret.encode("utf-8"))
-    proc = subprocess.run(["/usr/bin/security", "add-generic-password", "-a", getpass.getuser(),
-                           "-s", service, "-U", "-w"], input=encoded + b"\n" + encoded + b"\n",
-                          capture_output=True, timeout=30, check=False)
-    if proc.returncode != 0:
-        raise RotatorError(f"Could not save Keychain credential for {service}")
+    if not encoded or len(encoded) > 512 * 1024:
+        raise RotatorError("Credential size is outside the supported range")
+    try:
+        previous = _vault_manifest(service)
+    except RotatorError:
+        previous = None
+    generation = secrets.token_hex(8)
+    chunks = [encoded[i:i + 512] for i in range(0, len(encoded), 512)]
+    written = []
+    committed = False
+    root_attempted = False
+    try:
+        for i, chunk in enumerate(chunks):
+            name = f"{service}-{generation}-{i}"
+            written.append(name)
+            _keychain_item_write(name, chunk)
+        manifest = {"v": 4, "g": generation, "n": len(chunks),
+                    "h": hashlib.sha256(secret.encode("utf-8")).hexdigest()}
+        root_attempted = True
+        _keychain_item_write(service, base64.b64encode(json.dumps(manifest).encode()))
+        committed = True
+    except RotatorError:
+        if root_attempted:
+            try:
+                if previous:
+                    _keychain_item_write(service, base64.b64encode(json.dumps(previous).encode()))
+                else:
+                    _keychain_item_delete(service)
+            except RotatorError:
+                # Keep both generations if access is interrupted during rollback.
+                committed = True
+        raise
+    finally:
+        if not committed:
+            for name in written:
+                try:
+                    _keychain_item_delete(name)
+                except RotatorError:
+                    pass
+    if previous:
+        for i in range(previous["n"]):
+            try:
+                _keychain_item_delete(f"{service}-{previous['g']}-{i}")
+            except RotatorError:
+                pass
+
+
+def vault_delete(service: str) -> None:
+    if service.startswith("Switchboard-v4-"):
+        try:
+            value = _vault_manifest(service)
+        except RotatorError:
+            # Missing items are already deleted; damaged existing items require repair.
+            try:
+                _keychain_item_read(service)
+            except RotatorError:
+                return
+            raise
+        for i in range(value["n"]):
+            _keychain_item_delete(f"{service}-{value['g']}-{i}")
+    _keychain_item_delete(service)
 
 
 def migrate_vault(config: Config, config_path: Path, state: dict[str, Any]) -> dict[str, Any]:
     """Move older per-account items to items owned by Apple's signed security tool."""
     prepared = [account for account in config.accounts if account.name in state.get("identities", {})]
-    if state.get("vault_version") != 3:
+    if state.get("vault_version") != 4:
         for account in prepared:
             service = vault_service(config_path, account)
             try:
@@ -170,17 +277,32 @@ def migrate_vault(config: Config, config_path: Path, state: dict[str, Any]) -> d
                 continue
             except RotatorError:
                 pass
-            try:
-                raw = old_vault_read(old_vault_service(config_path, account))
-            except RotatorError:
-                raw = claude_credential(account.config_dir)
+            if account.name == state.get("current"):
+                if auth_identity(claude_binary(config), shared_env()) != state["identities"][account.name]:
+                    raise RotatorError("The shared login changed outside Switchboard; prepare accounts again")
+                raw = claude_credential(None)
+            else:
+                try:
+                    raw = base64.b64decode(_keychain_item_read(previous_vault_service(config_path, account)), validate=True).decode()
+                    credential_parts(raw)
+                except (RotatorError, ValueError, UnicodeDecodeError, binascii.Error):
+                    try:
+                        raw = old_vault_read(old_vault_service(config_path, account))
+                        credential_parts(raw)
+                    except RotatorError:
+                        env = base_env()
+                        env["CLAUDE_CONFIG_DIR"] = str(account.config_dir)
+                        if auth_identity(claude_binary(config), env) != state["identities"][account.name]:
+                            raise RotatorError(f"Sign in to {account.display_name} again before repairing its saved login")
+                        raw = claude_credential(account.config_dir)
             credential_parts(raw)
             keychain_write(service, raw)
-        state["vault_version"] = 3
+        state["vault_version"] = 4
     cleanup_pending = []
     for account in prepared:
         try:
             vault_delete(old_vault_service(config_path, account))
+            vault_delete(previous_vault_service(config_path, account))
         except RotatorError:
             cleanup_pending.append(account.name)
     state["old_vault_cleanup_pending"] = cleanup_pending
@@ -301,7 +423,7 @@ def setup(config: Config, config_path: Path) -> dict[str, Any]:
         state = {"enabled": False, "current": current, "identities": identities, "limited": {},
                  "history": [], "last_error": None,
                  "fallback_on_limit": old.get("fallback_on_limit", True) if STATE_FILE.exists() else True,
-                 "vault_version": 3}
+                 "vault_version": 4}
         state_save(state)
         return state
 
@@ -336,7 +458,7 @@ def claude_login(binary: str, raw: str) -> bool:
 
 def switch(config: Config, config_path: Path, state: dict[str, Any], target: Account,
            reason: str) -> dict[str, Any]:
-    if state.get("vault_version") != 3:
+    if state.get("vault_version") != 4:
         raise RotatorError("Saved accounts need a one-time Keychain update in Switchboard before switching")
     binary = claude_binary(config)
     expected = state["identities"].get(target.name)
@@ -349,10 +471,15 @@ def switch(config: Config, config_path: Path, state: dict[str, Any], target: Acc
     try:
         # Claude Code performs the exchange and writes its own shared Keychain login.
         if not claude_login(binary, raw):
-            raise RotatorError(f"Claude rejected the saved login for {target.display_name}; sign in to that profile again")
+            error = f"Claude rejected the saved login for {target.display_name}; sign in to that profile again"
+            state.setdefault("login_errors", {})[target.name] = error
+            raise RotatorError(error)
         actual = auth_identity(binary, shared_env())
         if actual != expected:
             raise RotatorError(f"Account verification failed: expected {expected}, got {actual}")
+        fresh = claude_credential(None)
+        credential_parts(fresh)
+        keychain_write(vault_service(config_path, target), fresh)
     except RotatorError:
         if previous_raw:
             try:
@@ -360,12 +487,10 @@ def switch(config: Config, config_path: Path, state: dict[str, Any], target: Acc
             except RotatorError:
                 pass
         raise
-    fresh = claude_credential(None)
-    credential_parts(fresh)
-    keychain_write(vault_service(config_path, target), fresh)
     previous = state.get("current")
     state["current"] = target.name
     state["last_error"] = None
+    state.get("login_errors", {}).pop(target.name, None)
     state.setdefault("history", []).append({"from": previous, "to": target.name,
                                              "reason": reason, "at": time.time()})
     state["history"] = state["history"][-50:]
@@ -382,6 +507,7 @@ def next_account(config: Config, state: dict[str, Any]) -> Account | None:
     for offset in range(1, len(names) + 1):
         account = config.accounts[(start + offset) % len(names)]
         if (account.name == current or account.name not in state.get("identities", {})
+                or account.name in state.get("login_errors", {})
                 or now - float(limited.get(account.name, 0)) < COOLDOWN_SECONDS):
             continue
         percent, _ = usage_percent(account, BASE_DIR)
@@ -511,6 +637,7 @@ def install_agent(config_path: Path) -> None:
         "Label": label,
         "ProgramArguments": [sys.executable, str(Path(__file__).resolve()),
                              "--config", str(config_path), "watch"],
+        "EnvironmentVariables": {"PATH": os.environ.get("PATH", os.defpath)},
         "RunAtLoad": True,
         "KeepAlive": True,
         "StandardOutPath": str(STATE_DIR / "watch.log"),
@@ -579,6 +706,9 @@ def watch(config: Config, config_path: Path, interval: int = 30) -> None:
                     except RotatorError as exc:
                         state["last_error"] = str(exc)
                         state_save(state)
+                else:
+                    state["last_error"] = "No prepared account is available. Sign in again to accounts with login errors, or wait for session usage to reset."
+                    state_save(state)
 
 
 def main() -> int:
@@ -650,7 +780,7 @@ def main() -> int:
     elif args.action == "ensure-monitor":
         with shared_lock():
             state = state_read()
-            if state.get("enabled") and state.get("vault_version") == 3:
+            if state.get("enabled") and state.get("vault_version") == 4:
                 install_agent(config_path)
     elif args.action == "migrate":
         with shared_lock():
