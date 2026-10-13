@@ -82,10 +82,10 @@ class PlatformTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             config = Path(root) / "project with $name and % /config.json"
             unit = Path(root) / "switchboard-test.service"
-            env = {"PATH": "/usr/bin:/home/test/.local/bin", "ANTHROPIC_API_KEY": "do-not-save"}
+            env = {"PATH": "/usr/bin:/home/test/.local/bin", "ANTHROPIC_API_KEY": "do-not-save", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/session-only"}
             with patch.object(background_monitor.sys, "platform", "linux"), \
                  patch.object(background_monitor, "linux_unit_path", return_value=unit), \
-                 patch.dict(os.environ, env), \
+                 patch.dict(os.environ, env, clear=True), \
                  patch.object(background_monitor, "run_checked") as run:
                 background_monitor.install(config, Path(root), Path(root) / "shared_mode.py")
                 content = unit.read_text()
@@ -93,9 +93,27 @@ class PlatformTests(unittest.TestCase):
                 self.assertIn("%%", content)
                 self.assertNotIn("do-not-save", content)
                 self.assertIn("Restart=on-failure", content)
-                self.assertEqual(run.call_args.args[0][-2:], ["restart", unit.name])
+                self.assertNotIn("session-only", content)
+                self.assertIn("Type=exec", content)
+                self.assertIn("KillMode=control-group", content)
+                run.assert_any_call(["systemctl", "--user", "import-environment", "DBUS_SESSION_BUS_ADDRESS"], unittest.mock.ANY)
+                run.assert_any_call(["systemctl", "--user", "is-active", "--quiet", unit.name], unittest.mock.ANY)
+                self.assertEqual(run.call_args.args[0][-2:], ["enable", unit.name])
                 background_monitor.remove(config, Path(root))
                 self.assertFalse(unit.exists())
+
+    def test_linux_failed_start_does_not_enable_login_startup(self):
+        with tempfile.TemporaryDirectory() as root:
+            unit = Path(root) / "test.service"
+            def checked(argv, error):
+                if "is-active" in argv:
+                    raise RotatorError(error)
+            with patch.object(background_monitor.sys, "platform", "linux"), \
+                 patch.object(background_monitor, "linux_unit_path", return_value=unit), \
+                 patch.object(background_monitor, "run_checked", side_effect=checked) as run:
+                with self.assertRaises(RotatorError):
+                    background_monitor.install(Path(root) / "config.json", Path(root), Path(root) / "monitor.py")
+                self.assertFalse(any("enable" in call.args[0] for call in run.call_args_list))
 
     def test_windows_task_uses_interactive_user_without_password_or_admin(self):
         argv = ["C:\\My App\\python.exe", "C:\\My App\\shared_mode.py", "--config", "C:\\Project & Work\\rotator.json", "watch"]

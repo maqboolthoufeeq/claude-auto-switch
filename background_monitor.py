@@ -44,17 +44,22 @@ def install(config_path: Path, state_dir: Path, script: Path) -> None:
         path = linux_unit_path(config_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         environment = ["Environment=" + systemd_quote(f"{key}={os.environ[key]}")
-                       for key in ("PATH", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY") if key in os.environ]
+                       for key in ("PATH",) if key in os.environ]
         content = ("[Unit]\nDescription=Switchboard session usage monitor\n"
-                   "[Service]\nType=simple\nExecStart=" + " ".join(systemd_quote(arg, command=True) for arg in argv) + "\n"
-                   + "\n".join(environment) + "\nRestart=on-failure\nRestartSec=10\n"
+                   "[Service]\nType=exec\nExecStart=" + " ".join(systemd_quote(arg, command=True) for arg in argv) + "\n"
+                   + "\n".join(environment) + "\nRestart=on-failure\nRestartSec=10\nKillMode=control-group\n"
                    "[Install]\nWantedBy=default.target\n")
         path.write_text(content, encoding="utf-8")
         path.chmod(0o600)
         error = "Cannot start the background monitor. Linux needs systemd user services in your logged-in desktop session."
+        # Desktop session addresses change at login; import them without freezing them in the unit.
+        session_keys = [key for key in ("DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY") if key in os.environ]
+        if session_keys:
+            run_checked(["systemctl", "--user", "import-environment", *session_keys], error)
         run_checked(["systemctl", "--user", "daemon-reload"], error)
-        run_checked(["systemctl", "--user", "enable", path.name], error)
         run_checked(["systemctl", "--user", "restart", path.name], error)
+        run_checked(["systemctl", "--user", "is-active", "--quiet", path.name], error)
+        run_checked(["systemctl", "--user", "enable", path.name], error)
     elif sys.platform == "win32":
         state_dir.mkdir(parents=True, exist_ok=True)
         task = windows_task(argv)
