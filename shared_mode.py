@@ -26,9 +26,10 @@ from rotator import (
     claude_binary, load_config, usage_percent,
 )
 from session_usage import read_session_usage
-from platform_runtime import file_lock, private_directory, check_macos_version
+from platform_runtime import file_lock, private_directory
 import secure_store
 import background_monitor
+from platform_runtime import check_macos_version
 
 
 STATE_DIR = BASE_DIR / ".shared-rotator"
