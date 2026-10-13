@@ -7,7 +7,6 @@ import argparse
 import base64
 import binascii
 from contextlib import contextmanager
-import fcntl
 import getpass
 import hashlib
 import json
@@ -27,6 +26,9 @@ from rotator import (
     claude_binary, load_config, usage_percent,
 )
 from session_usage import read_session_usage
+from platform_runtime import file_lock, private_directory
+import secure_store
+import background_monitor
 
 
 STATE_DIR = BASE_DIR / ".shared-rotator"
@@ -41,7 +43,9 @@ def require_macos() -> None:
 
 
 def base_env() -> dict[str, str]:
-    return {key: value for key, value in os.environ.items() if key not in ENV_REMOVE}
+    env = {key: value for key, value in os.environ.items() if key not in ENV_REMOVE}
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
 def shared_env() -> dict[str, str]:
@@ -86,6 +90,12 @@ def keychain_read(service: str) -> str:
 
 
 def claude_credential(config_dir: Path | None) -> str:
+    if sys.platform != "darwin":
+        folder = config_dir if config_dir is not None else Path.home() / ".claude"
+        try:
+            return (folder / ".credentials.json").read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RotatorError("Claude's saved login cannot be read. Sign in through Claude on this computer first.") from exc
     try:
         return keychain_read(keychain_service(config_dir))
     except RotatorError as keychain_error:
@@ -129,6 +139,8 @@ def keychain_helper_binary() -> Path:
 
 
 def _keychain_item_read(service: str) -> bytes:
+    if sys.platform != "darwin":
+        return secure_store.read(service)
     try:
         proc = subprocess.run(["/usr/bin/security", "find-generic-password", "-a", getpass.getuser(),
                                "-s", service, "-w"], capture_output=True, timeout=30, check=False)
@@ -140,6 +152,9 @@ def _keychain_item_read(service: str) -> bytes:
 
 
 def _keychain_item_write(service: str, value: bytes) -> None:
+    if sys.platform != "darwin":
+        secure_store.write(service, value)
+        return
     # security's password prompt truncates at 128 characters; its command parser also has a line limit.
     command = shlex.join(["add-generic-password", "-a", getpass.getuser(), "-s", service,
                           "-U", "-w", value.decode("ascii")]) + "\n"
@@ -191,6 +206,9 @@ def old_vault_read(service: str) -> str:
 
 
 def _keychain_item_delete(service: str) -> None:
+    if sys.platform != "darwin":
+        secure_store.delete(service)
+        return
     try:
         proc = subprocess.run(["/usr/bin/security", "delete-generic-password", "-a", getpass.getuser(),
                                "-s", service], capture_output=True,
@@ -332,7 +350,7 @@ def credential_parts(raw: str) -> tuple[str, str]:
 def auth_identity(binary: str, env: dict[str, str]) -> str:
     try:
         proc = subprocess.run([binary, "auth", "status"], env=env, capture_output=True,
-                              text=True, timeout=20, check=False)
+                              text=True, encoding="utf-8", errors="replace", timeout=20, check=False)
         value = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         raise RotatorError(f"Could not verify Claude login: {exc}") from exc
@@ -364,14 +382,10 @@ def state_save(value: dict[str, Any]) -> None:
 
 @contextmanager
 def shared_lock():
-    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_directory(STATE_DIR)
     lock = STATE_DIR / "lock"
-    with lock.open("w", encoding="utf-8") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+    with file_lock(lock):
+        yield
 
 
 def account_by_name(config: Config, name: str) -> Account:
@@ -382,7 +396,8 @@ def account_by_name(config: Config, name: str) -> Account:
 
 
 def setup(config: Config, config_path: Path) -> dict[str, Any]:
-    require_macos()
+    if sys.platform not in ("darwin", "win32") and not sys.platform.startswith("linux"):
+        raise RotatorError("Shared switching supports macOS, Linux, and Windows")
     binary = claude_binary(config)
     with shared_lock():
         if STATE_FILE.exists():
@@ -450,7 +465,7 @@ def claude_login(binary: str, raw: str) -> bool:
     env["CLAUDE_CODE_OAUTH_SCOPES"] = scopes
     try:
         proc = subprocess.run([binary, "auth", "login", "--claudeai"], env=env,
-                              capture_output=True, text=True, timeout=90, check=False)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RotatorError(f"Claude login could not run: {exc}") from exc
     return proc.returncode == 0
@@ -564,6 +579,8 @@ def hook(config: Config, config_path: Path) -> None:
 
 def hook_command(config_path: Path) -> str:
     args = [sys.executable, str(Path(__file__).resolve()), "--config", str(config_path), "hook"]
+    if sys.platform == "win32":
+        return "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in args) + " " + HOOK_MARKER
     return " ".join(shlex.quote(arg) for arg in args) + " " + HOOK_MARKER
 
 
@@ -586,12 +603,17 @@ def install_hook(config_path: Path, settings_path: Path) -> None:
             for item in entry.get("hooks", []):
                 if isinstance(item, dict) and HOOK_MARKER in str(item.get("command", "")):
                     item["command"] = command
+                    if sys.platform == "win32":
+                        item["shell"] = "powershell"
                     break
             else:
                 continue
             break
     else:
-        entries.append({"matcher": "rate_limit", "hooks": [{"type": "command", "command": command}]})
+        item = {"type": "command", "command": command}
+        if sys.platform == "win32":
+            item["shell"] = "powershell"
+        entries.append({"matcher": "rate_limit", "hooks": [item]})
     if settings_path.exists():
         backup = STATE_DIR / "settings-before-shared-login.json"
         if not backup.exists():
@@ -630,6 +652,9 @@ def agent_path(config_path: Path) -> tuple[str, Path]:
 
 
 def install_agent(config_path: Path) -> None:
+    if sys.platform != "darwin":
+        background_monitor.install(config_path, STATE_DIR, Path(__file__).resolve())
+        return
     require_macos()
     label, path = agent_path(config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -659,6 +684,9 @@ def install_agent(config_path: Path) -> None:
 
 
 def remove_agent(config_path: Path) -> None:
+    if sys.platform != "darwin":
+        background_monitor.remove(config_path, STATE_DIR)
+        return
     label, path = agent_path(config_path)
     if path.exists():
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)],
@@ -678,10 +706,13 @@ def watch(config: Config, config_path: Path, interval: int = 30) -> None:
             if not current:
                 continue
             account = account_by_name(config, current)
-        if account.usage_command:
-            percent, error = usage_percent(account, BASE_DIR)
-        else:
-            percent, error = read_session_usage(claude_binary(config), shared_env())
+        try:
+            if account.usage_command:
+                percent, error = usage_percent(account, BASE_DIR)
+            else:
+                percent, error = read_session_usage(claude_binary(config), shared_env())
+        except (RotatorError, OSError) as exc:
+            percent, error = None, str(exc)
         with shared_lock():
             state = state_read()
             if not state.get("enabled") or state.get("current") != current:
@@ -715,7 +746,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=BASE_DIR / "rotator.json")
     sub = parser.add_subparsers(dest="action", required=True)
-    sub.add_parser("setup", help="Import signed-in profiles into private macOS Keychain slots")
+    sub.add_parser("setup", help="Import signed-in profiles into the OS protected credential store")
     sub.add_parser("enable", help="Enable limit hooks and shared-login rotation")
     sub.add_parser("disable", help="Disable rotation and remove its Claude hook")
     sub.add_parser("status", help="Show shared-login mode state")

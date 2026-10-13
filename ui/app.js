@@ -294,7 +294,7 @@ function confirmAccountAction(action) {
   const label = selectedAccountInfo.display_name;
   $("account-confirm-title").textContent = action === "delete" ? "Delete " + label + " from Switchboard?" : "Log out " + label + "?";
   $("account-confirm-message").textContent = action === "delete"
-    ? "This signs out the profile, removes it from rotation, and deletes its Switchboard entry. The local profile folder and chat history stay on your Mac."
+    ? "This signs out the profile, removes it from rotation, and deletes its Switchboard entry. The local profile folder and chat history stay on your computer."
     : "This signs out the profile and removes its saved login from automatic rotation. You can sign in again later.";
   $("account-confirm-proceed").textContent = action === "delete" ? "Delete account" : "Log out";
   $("account-confirm").hidden = false;

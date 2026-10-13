@@ -4,13 +4,11 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-import fcntl
+from contextlib import contextmanager, ExitStack
 import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -18,6 +16,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from platform_runtime import RotatorError, file_lock, interrupt_process, process_options, private_directory
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -55,10 +55,6 @@ ENV_REMOVE = {
     "CLAUDE_CODE_USE_MANTLE",
     "CLAUDE_CODE_USE_ANTHROPIC_AWS",
 }
-
-
-class RotatorError(Exception):
-    pass
 
 
 @dataclass(frozen=True)
@@ -163,6 +159,7 @@ def load_config(path: Path) -> Config:
 
 def profile_env(account: Account) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key not in ENV_REMOVE}
+    env["PYTHONIOENCODING"] = "utf-8"
     env["CLAUDE_CONFIG_DIR"] = str(account.config_dir)
     return env
 
@@ -170,7 +167,7 @@ def profile_env(account: Account) -> dict[str, str]:
 def claude_binary(config: Config) -> str:
     found = shutil.which(config.claude_command)
     if not found and config.claude_command == "claude":
-        for candidate in (Path.home() / ".local/bin/claude", Path("/opt/homebrew/bin/claude"),
+        for candidate in (Path.home() / ".local/bin/claude.exe", Path.home() / ".local/bin/claude", Path("/opt/homebrew/bin/claude"),
                           Path("/usr/local/bin/claude")):
             if candidate.is_file() and os.access(candidate, os.X_OK):
                 return str(candidate)
@@ -183,7 +180,7 @@ def auth_status(binary: str, account: Account) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
             [binary, "auth", "status"], env=profile_env(account),
-            capture_output=True, text=True, timeout=20, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20, check=False,
         )
         data = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
@@ -205,7 +202,7 @@ def usage_percent(account: Account, project: Path) -> tuple[float | None, str | 
     try:
         proc = subprocess.run(
             account.usage_command, cwd=project, env=env,
-            capture_output=True, text=True, timeout=15, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, check=False,
         )
         if proc.returncode != 0:
             return None, f"usage check failed for {account.display_name} (exit {proc.returncode})"
@@ -262,7 +259,7 @@ def task_prompt(state: dict[str, Any], handoff: Path) -> str:
 
 def run_claude(binary: str, config: Config, account: Account, project: Path,
                prompt: str, log_dir: Path, session_id: str | None) -> tuple[int, dict[str, Any] | None, str]:
-    log_dir.mkdir(parents=True, exist_ok=True)
+    private_directory(log_dir)
     stdout_path = log_dir / "stdout.json"
     stderr_path = log_dir / "stderr.txt"
     argv = [binary, "-p", prompt, "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
@@ -274,7 +271,7 @@ def run_claude(binary: str, config: Config, account: Account, project: Path,
         os.chmod(stdout_path, 0o600)
         os.chmod(stderr_path, 0o600)
         proc = subprocess.Popen(argv, cwd=project, env=env, stdin=subprocess.DEVNULL,
-                                stdout=stdout, stderr=stderr)
+                                stdout=stdout, stderr=stderr, **process_options())
         try:
             while True:
                 try:
@@ -283,11 +280,11 @@ def run_claude(binary: str, config: Config, account: Account, project: Path,
                 except subprocess.TimeoutExpired:
                     print(f"{account.display_name} is still working…", flush=True)
         except KeyboardInterrupt:
-            proc.send_signal(signal.SIGINT)
+            interrupt_process(proc)
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                proc.terminate()
+                interrupt_process(proc, force=True)
                 proc.wait()
             raise
     raw = stdout_path.read_text(encoding="utf-8", errors="replace")
@@ -345,17 +342,14 @@ def ensure_project_ignore(project: Path, config: Config) -> None:
 @contextmanager
 def task_lock(project: Path):
     folder = project / ".claude-rotator"
-    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    private_directory(folder)
     lock_path = folder / "lock"
-    with lock_path.open("w", encoding="utf-8") as handle:
+    with ExitStack() as stack:
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            stack.enter_context(file_lock(lock_path, blocking=False))
         except BlockingIOError as exc:
             raise RotatorError("Another rotator run is already active in this project") from exc
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+        yield
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
@@ -476,6 +470,9 @@ def execute_task(config: Config, project: Path, task: str | None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.platform == "win32":
+        import signal
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("rotator.json"))
     sub = parser.add_subparsers(dest="command", required=True)
@@ -502,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
         account = next((item for item in config.accounts if item.name == args.account), None)
         if account is None:
             raise RotatorError(f"Unknown account: {args.account}")
-        account.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        private_directory(account.config_dir)
         command = [binary, "auth", "login"]
         if account.email:
             command.extend(["--email", account.email])

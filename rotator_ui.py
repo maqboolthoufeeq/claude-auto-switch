@@ -32,6 +32,7 @@ from rotator import (
     state_paths,
 )
 from shared_mode import STATE_FILE, old_vault_service, previous_vault_service, shared_env, shared_lock, state_read, state_save, vault_delete, vault_service
+from platform_runtime import choose_folder, interrupt_process, process_options, private_directory
 
 
 ASSETS = {
@@ -45,7 +46,7 @@ DASHBOARD_PORT = 56729
 def save_dashboard_url(config_path: Path, url: str) -> Path:
     """Let the launcher reopen this server without exposing its token in the page."""
     directory = config_path.parent / ".shared-rotator"
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_directory(directory)
     path = directory / "dashboard-url"
     temporary = directory / f".dashboard-url-{secrets.token_hex(8)}"
     try:
@@ -180,9 +181,9 @@ class Dashboard:
             self.last_exit_code = None
             try:
                 process = subprocess.Popen(
-                    argv, cwd=BASE_DIR, env=env, stdin=subprocess.DEVNULL,
+                    argv, cwd=BASE_DIR, env=dict(env or os.environ, PYTHONIOENCODING="utf-8"), stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, start_new_session=True,
+                    text=True, encoding="utf-8", errors="replace", bufsize=1, **process_options(),
                 )
             except OSError as exc:
                 raise RotatorError(f"Could not start {kind}: {exc}") from exc
@@ -241,7 +242,7 @@ class Dashboard:
         account = next((item for item in config.accounts if item.name == name), None)
         if account is None:
             raise RotatorError("Unknown account")
-        account.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        private_directory(account.config_dir)
         command = [claude_binary(config), "auth", "login"]
         if account.email:
             command.extend(["--email", account.email])
@@ -436,10 +437,7 @@ class Dashboard:
             process = self.process
             if process is None or process.poll() is not None:
                 raise RotatorError("Nothing is running")
-        try:
-            os.killpg(process.pid, signal.SIGINT)
-        except ProcessLookupError:
-            pass
+        interrupt_process(process)
         self._record("Stop requested")
 
     def shutdown(self) -> None:
@@ -447,11 +445,11 @@ class Dashboard:
             process = self.process
         if process is not None and process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGINT)
+                interrupt_process(process)
                 process.wait(timeout=10)
             except (ProcessLookupError, subprocess.TimeoutExpired):
                 if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    interrupt_process(process, force=True)
 
     def task_status(self, project_text: str | None) -> dict[str, object]:
         with self.lock:
@@ -652,15 +650,7 @@ def make_handler(dashboard: Dashboard, token: str):
                 elif route == "/api/shared":
                     dashboard.shared_action(str(data.get("action", "")), str(data.get("account", "")))
                 elif route == "/api/pick-project":
-                    if sys.platform != "darwin":
-                        raise RotatorError("Enter the project folder path on this computer")
-                    result = subprocess.run(
-                        ["osascript", "-e", 'POSIX path of (choose folder with prompt "Choose the code project")'],
-                        capture_output=True, text=True, timeout=120, check=False,
-                    )
-                    if result.returncode != 0:
-                        raise RotatorError("No folder was selected")
-                    self._send_json({"project": result.stdout.strip()})
+                    self._send_json({"project": choose_folder()})
                     return
                 else:
                     self._send_json({"error": "Not found"}, 404)
@@ -710,7 +700,10 @@ def main() -> int:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop_on_signal)
-    signal.signal(signal.SIGHUP, stop_on_signal)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, stop_on_signal)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, stop_on_signal)
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:

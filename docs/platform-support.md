@@ -1,27 +1,51 @@
-# Platform support and next steps
+# Platform setup and test status
 
-This table distinguishes the current implementation from planned platform work. Passing simulated tests does not verify a real operating system's credential store, background service, or Claude login.
+The same dashboard and switching logic run on each platform, always at **http://127.0.0.1:56729/**. The adapters use each operating system's credential store, terminal, and background service.
 
-| Platform | Current status | Work needed before full support |
-| --- | --- | --- |
-| Current Apple Silicon macOS | Dashboard, live session reader, and background monitor checked locally; real two-terminal switch test still needed | Complete the live test in [testing.md](testing.md) |
-| Older macOS 13+ and Intel Macs | Uses the same macOS implementation; older systems and Intel hardware have not been tested | Test installation, Keychain access, launch agent, usage reader, and live switching on these systems |
-| Linux and Ubuntu | The guided task runner is designed for Unix; shared switching still requires macOS | Add a secure Secret Service credential backend, a user background service, Linux launch instructions, and real Claude tests |
-| Native Windows | Not supported yet; Unix-only imports currently prevent startup | Replace file locking and process control, add a Windows terminal adapter, secure credential storage, background task, and launcher |
-| Windows with WSL | Depends on the Linux implementation; shared switching is not ready | Test the Linux backend inside WSL; keep Claude and Switchboard in the same WSL environment |
+| Platform | Saved switching credentials | Background monitor | Verification |
+| --- | --- | --- | --- |
+| macOS 13+, Apple Silicon or Intel | macOS Keychain | LaunchAgent | Real shared-login rotation verified on the current Apple Silicon Mac; older versions and Intel hardware still need live checks |
+| Ubuntu 20.04+, Debian 10+, other Linux desktops | Secret Service, such as GNOME Keyring | systemd user service | Preview: automated suite, real keyring, and terminal checks; real Claude login and desktop service checks remain |
+| Windows 10 1809+, Windows 11 | Windows Credential Manager | Task Scheduler, current logged-in user | Preview: Windows CI includes native credential and terminal checks; real Claude login and desktop startup checks remain |
+| WSL | Linux Secret Service inside WSL | systemd user service inside WSL | Same Linux implementation; WSL desktop/keyring setup has not been verified |
 
-## Target versions
+These OS minimums follow [Claude Code's published requirements](https://code.claude.com/docs/en/setup#system-requirements). Current Claude Code does not support macOS before 13. Switchboard cannot make those older versions compatible. New macOS installations do not require the Swift helper; it is retained only to recover older Switchboard Keychain entries.
 
-The initial targets follow [Claude Code's published system requirements](https://code.claude.com/docs/en/setup#system-requirements): macOS 13+, Windows 10 version 1809+, Ubuntu 20.04+, and Debian 10+. Python 3.9+ is also required by Switchboard and can be managed by uv.
+## macOS
 
-Support for macOS older than 13 would require a compatible Claude Code version as well as Switchboard changes. Do not assume that changing this app can make the current Claude binary run on an older operating system.
+Follow the [README](../README.md). Use **Open Switchboard.command** after the first `uv sync`. The same implementation targets Intel and Apple Silicon; uv selects the matching Python architecture.
 
-## Extension order
+## Ubuntu and Linux desktops
 
-1. Complete the current macOS live switching test and fix any failures.
-2. Add Linux/Ubuntu credential storage and background monitoring. Keep credentials out of plaintext Switchboard files and process arguments.
-3. Add native Windows credential protection, terminal handling, locking, process control, and background monitoring.
-4. Verify older macOS and Intel Macs without requiring the old Swift migration helper for a new installation.
-5. Publish platform instructions and mark a platform supported only after its real credential and two-terminal tests pass.
+Install Claude Code, uv, and Git, then follow the README. A working **systemd user session** and **unlocked Secret Service** are required for automatic switching. For an Ubuntu desktop missing these packages:
 
-Every platform must keep the dashboard on port **56729**, preserve account names and thresholds, use current session usage, provide the consent-controlled limit fallback, and protect saved credentials.
+```sh
+sudo apt install gnome-keyring dbus-user-session zenity
+```
+
+Sign in to your desktop normally and unlock its keyring. Switchboard does not save the keyring password. A compatible Secret Service provider can replace GNOME Keyring; an arbitrary or plaintext Python keyring backend cannot.
+
+Start with `uv run launch.py`, then use **Open Switchboard.sh**. Zenity or KDialog supplies the optional folder picker; you can also type a project path.
+
+On a headless server or Linux without systemd user services, automatic switching cannot be enabled through this implementation. Do not disable keyring encryption to work around that limitation.
+
+## Native Windows
+
+Install Claude Code, uv, and Git as your normal Windows user. Open PowerShell in the cloned project:
+
+```powershell
+uv sync --python 3.14
+uv run launch.py
+```
+
+Then use **Open Switchboard.cmd**. The Windows terminal dependency has current x64 and ARM64 wheels for Python 3.10+. Python 3.9 is retained for compatibility with the older x64 terminal dependency.
+
+Turning on automatic switching creates a Task Scheduler task for your current user. It starts immediately and at your next sign-in, with ordinary user permissions and no saved Windows password. It watches only while that user is signed in. Turning switching off removes the task. Your organization may restrict task registration; Switchboard reports that failure instead of silently claiming monitoring is active.
+
+The folder picker and private-folder access controls use the built-in Windows PowerShell. The dashboard, profiles, and Claude must run under the same user. Keep native Windows and WSL installations separate: they have different active Claude logins and credential stores.
+
+## Verify a platform before relying on it
+
+Follow [testing.md](testing.md), including the two-terminal continuation test. A passed simulated test or a changed route marker alone does not verify that an already-open Claude chat adopted the new account.
+
+All platforms keep account names, per-account session thresholds, manual switching, and the user-controlled limit fallback. Weekly usage is still not used for switching.

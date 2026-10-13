@@ -18,7 +18,7 @@ uv run rotator.py status
 
 Claude handles authentication and creates the profile files. Do not store account passwords in the project.
 
-## Shared login controls — macOS
+## Shared login controls
 
 These commands match the dashboard controls:
 
@@ -32,7 +32,9 @@ uv run shared_mode.py fallback on
 uv run shared_mode.py disable
 ```
 
-`setup` imports signed-in profiles into macOS Keychain. Turn switching off before preparing accounts again. `enable` installs a background monitor and a Claude `StopFailure` hook in `~/.claude/settings.json`, preserving existing hooks and saving a settings backup in `.shared-rotator/`. New Claude chats load the hook. `disable` removes the monitor and Switchboard's hook; the current shared login stays in place.
+`setup` imports signed-in profiles into the protected OS credential store. Turn switching off before preparing accounts again. `enable` installs a background monitor and a Claude `StopFailure` hook in `~/.claude/settings.json`, preserving existing hooks and saving a settings backup in `.shared-rotator/`. New Claude chats load the hook. `disable` removes the monitor and Switchboard's hook; the current shared login stays in place.
+
+The monitor uses a macOS launch agent, a Linux systemd user service, or a Windows Task Scheduler task for the current interactive user. No service runs as an administrator. Linux Secret Service must be available in that user's D-Bus session. Windows hooks use explicitly quoted PowerShell commands; macOS and Linux use the system shell.
 
 The monitor reads only the active account's current session percentage. Checks use a short-lived Claude session in safe mode and send `/usage`, without a model prompt. The terminal display is rendered with pyte so a refreshed percentage replaces earlier text. The reader waits for refreshing to finish and verifies the shared login before switching. It does not depend on Claude's local usage cache, which can remain stale. Claude's display format can change.
 
@@ -42,7 +44,7 @@ If Claude rejects a saved login, that account is marked **Needs sign-in** and sk
 
 Claude cloud sessions are not controlled. Account-linked Remote Control connections may need to reconnect after a switch. Terminal chats using a separate `CLAUDE_CONFIG_DIR`, an API key, or a fixed `CLAUDE_CODE_OAUTH_TOKEN` do not follow the shared login.
 
-For older saved Keychain items only:
+For older saved macOS Keychain items only:
 
 ```sh
 uv run shared_mode.py migrate
@@ -50,7 +52,7 @@ uv run shared_mode.py migrate
 
 This repairs older saved credentials, moves them to items owned by Apple's signed Keychain utility, and removes obsolete copies. Long credentials are split into small Keychain items, verified after writing, and checked against a checksum when read. The old Swift helper may require Xcode command line tools during migration. Normal switches use the signed utility, with credential data passed through standard input and output rather than command arguments.
 
-## Guided tasks — macOS or Linux
+## Guided tasks
 
 Turn off shared switching before using the separate-profile task runner. The two modes refresh copies of the same OAuth credentials, so running them together can leave a login needing sign-in again.
 
@@ -75,7 +77,7 @@ The command must print a number from 0 to 100, or JSON such as `{"used_percent":
 
 ## Development
 
-Python 3.9 or newer is required and managed by uv. `uv sync` installs pyte and its terminal text dependency.
+Python 3.9 or newer is required and managed by uv. `uv sync` installs pyte, keyring on Linux/Windows, and pywinpty on Windows. Python 3.10+ is recommended on native Windows for current terminal wheels, including ARM64. Python 3.9 uses the older pywinpty 2 release.
 
 ```sh
 uv sync
@@ -83,4 +85,6 @@ uv run python -B -m unittest discover -s tests -v
 node --check ui/app.js
 ```
 
-Tests simulate Claude; they do not contact Anthropic or use your accounts. The runner removes inherited API-key and provider-routing variables and verifies a `claude.ai` login before using a profile. It uses Claude's `auto` permission mode and preserves organization policies.
+Tests simulate Claude; they do not contact Anthropic or use your accounts. They exercise real terminal I/O and file locks, and create/remove disposable Windows credential entries when run on Windows. GitHub Actions runs the suite on macOS, Ubuntu, and Windows with Python 3.9 and 3.14.
+
+The runner removes inherited API-key and provider-routing variables and verifies a `claude.ai` login before using a profile. It uses Claude's `auto` permission mode and preserves organization policies. On Windows, private runtime/profile folders receive a protected ACL allowing the current user and SYSTEM; Unix folders use mode 0700. Do not place profiles on shared folders or copy the private dashboard link to other users.

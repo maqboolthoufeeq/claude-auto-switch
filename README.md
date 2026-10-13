@@ -8,7 +8,9 @@ Set a threshold such as **95%**, keep usage-limit switching as a fallback, and m
 
 ## Before you start
 
-You need **macOS**, [Claude Code](https://code.claude.com/docs/en/setup) 2.1.259 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and at least two Claude accounts you control. uv manages Python for you.
+You need [Claude Code](https://code.claude.com/docs/en/setup) 2.1.259 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and at least two Claude accounts you control. uv manages Python for you.
+
+Platform targets: **macOS 13+**, **Ubuntu/Linux desktops**, and **Windows 10 1809+**. The Linux and Windows ports are preview builds; see [platform setup and test status](docs/platform-support.md). Linux automatic switching needs systemd user services and an unlocked Secret Service credential store.
 
 ## Get started
 
@@ -20,11 +22,12 @@ Run these commands in Terminal:
 git clone https://github.com/maqboolthoufeeq/claude-auto-switch.git
 cd claude-auto-switch
 uv sync
-uv run rotator.py init
-uv run rotator_ui.py
+uv run launch.py
 ```
 
-Use the browser tab opened by the launcher at **http://127.0.0.1:56729/**. Next time, double-click **Open Switchboard.command** in the project folder. Run `rotator.py init` only for the first setup.
+Use the browser tab opened by the launcher at **http://127.0.0.1:56729/**. The launcher creates the first configuration automatically and reopens an existing dashboard.
+
+Next time, use **Open Switchboard.command** on macOS, **Open Switchboard.cmd** on Windows, or `./Open\ Switchboard.sh` on Linux.
 
 ### 2. Connect your accounts
 
@@ -54,7 +57,7 @@ The monitor checks usage about every 30 seconds and switches at the saved thresh
 | Change the shared login immediately | **Switch manually** |
 | Stop background switching | **Turn off switching** |
 
-Deleting an account signs out its profile and removes its saved Switchboard login. Local chat history stays on your Mac. Switch away from the active account before removing it.
+Deleting an account signs out its profile and removes its saved Switchboard login. Local chat history stays on your computer. Switch away from the active account before removing it.
 
 ## Optional: let Switchboard run a task
 
@@ -62,7 +65,8 @@ Turn off automatic switching, then open **Run a guided task**. Choose your proje
 
 ## Privacy and limits
 
-- Saved switching credentials live in **macOS Keychain**. Profiles, configuration, private dashboard links, and logs are excluded from Git.
+- Saved switching credentials live in **macOS Keychain**, **Linux Secret Service**, or **Windows Credential Manager**. Switchboard never falls back to plaintext for its saved switching copies. Claude manages its own active credential files on Linux and Windows.
+- Profiles, configuration, private dashboard links, and logs are excluded from Git. Sign in separately on each computer; do not copy or publish profile folders.
 - The dashboard runs locally and requires its private launcher link. Opening `ui/index.html` directly does not connect it.
 - Terminal chats must use the default Claude login. Separate profiles, API keys, and fixed OAuth tokens do not follow shared switching.
 - Changes to Claude's `/usage` display can make percentage checks unavailable. Keep the limit fallback enabled if you want switching to continue at reported limits.
@@ -79,6 +83,8 @@ Turn off automatic switching, then open **Run a guided task**. Choose your proje
 
 macOS may request Keychain approval again if the Keychain is locked or its permissions are reset.
 
+On Linux, unlock the credential store in your desktop session before preparing accounts. On Windows, the monitor runs as your logged-in user through Task Scheduler, without an administrator account or a saved Windows password.
+
 For terminal commands, custom usage checks, and development instructions, see the [advanced guide](docs/advanced.md).
 
-To check the software yourself, follow the [testing guide](docs/testing.md). See [platform support](docs/platform-support.md) for current status and the Linux, Windows, and older macOS targets.
+To check the software yourself, follow the [testing guide](docs/testing.md). See [platform support](docs/platform-support.md) for installation details and verified test coverage.

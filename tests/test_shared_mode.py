@@ -98,6 +98,7 @@ class SharedModeTests(unittest.TestCase):
             patch.object(shared_mode, "require_macos"),
             patch.object(shared_mode, "claude_binary", return_value="/fake/claude"),
             patch.object(shared_mode, "keychain_read", side_effect=self.keychain_read),
+            patch.object(shared_mode, "claude_credential", side_effect=lambda directory: self.keychain_read(shared_mode.keychain_service(directory))),
             patch.object(shared_mode, "vault_read", side_effect=self.keychain_read),
             patch.object(shared_mode, "keychain_write", side_effect=self.keychain_write),
             patch.object(shared_mode, "auth_identity", side_effect=self.auth_identity),
@@ -254,6 +255,7 @@ class SharedModeTests(unittest.TestCase):
     def test_background_monitor_installs_without_shell_or_secrets(self):
         path = self.root / "LaunchAgents" / "switchboard.plist"
         with patch.object(shared_mode, "agent_path", return_value=("switchboard.test", path)), \
+             patch.object(shared_mode.sys, "platform", "darwin"), \
              patch.object(shared_mode.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
             shared_mode.install_agent(self.config_path)
         value = plistlib.loads(path.read_bytes())
@@ -264,7 +266,8 @@ class SharedModeTests(unittest.TestCase):
 
     def test_keychain_write_passes_secret_only_on_stdin(self):
         encoded = base64.b64encode(b"private-credential")
-        with patch.object(shared_mode.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=encoded+b"\n", stderr=b"")) as run:
+        with patch.object(shared_mode.sys, "platform", "darwin"), \
+             patch.object(shared_mode.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=encoded+b"\n", stderr=b"")) as run:
             REAL_KEYCHAIN_ITEM_WRITE("Switchboard-test", encoded)
         args = run.call_args.args[0]
         self.assertEqual(args[:2], ["/usr/bin/security", "find-generic-password"])

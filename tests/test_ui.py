@@ -1,5 +1,6 @@
 import json
 import stat
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -9,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import rotator_ui
 from rotator_ui import Dashboard
+from test_helpers import write_executable
 
 
 class AuthorizationTests(unittest.TestCase):
@@ -62,9 +64,7 @@ class DashboardTests(unittest.TestCase):
         self.root = Path(temp.name)
         self.project = self.root / "project"
         self.project.mkdir()
-        self.fake = self.root / "claude"
-        self.fake.write_text(FAKE_CLAUDE)
-        self.fake.chmod(0o755)
+        self.fake = write_executable(self.root / "claude", FAKE_CLAUDE)
         self.config = self.root / "rotator.json"
         self.config.write_text(json.dumps({
             "claude_command": str(self.fake), "permission_mode": "auto", "max_runs": 4,
@@ -85,7 +85,8 @@ class DashboardTests(unittest.TestCase):
     def test_dashboard_link_is_private_and_updates_on_restart(self):
         path = rotator_ui.save_dashboard_url(self.config, "http://127.0.0.1:56729/#token=first")
         self.assertEqual(path.read_text().strip(), "http://127.0.0.1:56729/#token=first")
-        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        if sys.platform != "win32":
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         rotator_ui.save_dashboard_url(self.config, "http://127.0.0.1:56729/#token=second")
         self.assertEqual(path.read_text().strip(), "http://127.0.0.1:56729/#token=second")
 

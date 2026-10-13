@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from test_helpers import write_executable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,12 +63,8 @@ class RotatorIntegrationTests(unittest.TestCase):
         self.project = self.root / "project"
         self.project.mkdir()
         self.trace = self.root / "trace"
-        self.fake = self.root / "claude"
-        self.fake.write_text(FAKE_CLAUDE)
-        self.fake.chmod(0o755)
-        self.usage = self.root / "usage"
-        self.usage.write_text(FAKE_USAGE)
-        self.usage.chmod(0o755)
+        self.fake = write_executable(self.root / "claude", FAKE_CLAUDE)
+        self.usage = write_executable(self.root / "usage", FAKE_USAGE)
         self.config = self.root / "rotator.json"
         self.accounts = [
             {"name": f"account-{n}", "config_dir": str(self.root / f"account-{n}"),

@@ -3,5 +3,8 @@ name = "claude-account-rotator"
 version = "0.1.0"
 requires-python = ">=3.9"
 dependencies = [
+    "keyring>=25.6,<26 ; sys_platform == 'linux' or sys_platform == 'win32'",
     "pyte>=0.8.2,<0.9",
+    "pywinpty>=2.0.15,<3 ; python_full_version < '3.10' and sys_platform == 'win32'",
+    "pywinpty>=3.0.5,<4 ; python_full_version >= '3.10' and sys_platform == 'win32'",
 ]

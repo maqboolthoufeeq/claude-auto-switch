@@ -1,13 +1,13 @@
 # Test Switchboard
 
-Start with the checks below on your Mac. Use the launcher to open the dashboard on port **56729**.
+Use the checks below on each operating system. Start through its launcher and keep the dashboard on port **56729**. Follow [platform setup](platform-support.md) first.
 
 ## Verified on October 13, 2026
 
 - A real background check read the current session percentage from Claude's rendered `/usage` screen. At 10% usage and a saved 10% threshold, it switched from account-5 to account-1. Claude's shared account identity was verified after the switch.
 - A rejected account-6 login was skipped. That account needs a fresh sign-in and preparation before it can rejoin rotation.
 - Disposable Keychain values of 524, 9,380, and 20,000 characters were written, read back exactly, updated, and removed. All six prepared credentials were checked for complete, readable JSON; this does not prove all six refresh tokens are still accepted by Claude.
-- All 32 automated tests passed on macOS with Python 3.9 and 3.14, and in isolated Ubuntu 22.04 with Python 3.10. Ubuntu tests used simulated credentials and Claude; Linux shared switching is not implemented yet.
+- Before the platform extension, all 32 automated tests passed on macOS with Python 3.9 and 3.14, and in isolated Ubuntu 22.04 with Python 3.10. Those Ubuntu checks simulated credentials and Claude.
 
 The two-terminal chat continuation check below, native Windows, and older macOS hardware remain unverified.
 
@@ -27,7 +27,7 @@ This test changes the shared account used by your local Claude terminals. Choose
 1. Open two Terminal windows in two projects and run `claude` in each. Both must use the default Claude login, without a separate profile or fixed token.
 2. In each chat, send: **Reply with “ready” without editing files or running tools.**
 3. In Switchboard, select another prepared account under **Switch manually** and click **Switch account**.
-4. Wait for the current account and route marker to update. Record whether macOS asks for Keychain approval.
+4. Wait for the current account and route marker to update. Record whether the OS credential store requests approval or unlocking.
 5. In both existing chats, send: **Reply with “test complete” without editing files or running tools.** Keep the same chats open.
 6. Check `/status` and `/usage` in both chats. They should reflect the selected account and allow you to continue. A changed dashboard alone proves the shared login changed; it does not prove an already-running chat adopted it.
 7. Switch back to the starting account and repeat a short message in each chat.
@@ -70,3 +70,7 @@ node --check ui/app.js
 ```
 
 These tests simulate Claude and saved credentials. They do not switch your real accounts.
+
+The extended suite also exercises real terminal redraws and file-lock contention. On native Windows it writes, reads, and deletes disposable Credential Manager entries. GitHub Actions runs it on Ubuntu, macOS, and Windows with Python 3.9 and 3.14. Linux's real GNOME Keyring is checked separately in an isolated Ubuntu container, without mounting account profiles.
+
+For Linux, also close the launcher and verify the systemd user service continues updating usage. For Windows, repeat after signing out and back in to verify Task Scheduler startup. For older supported macOS, repeat with that OS version and processor; tests on the current Mac do not establish older-version compatibility.
