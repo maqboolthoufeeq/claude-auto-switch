@@ -31,7 +31,7 @@ On a headless server or Linux without systemd user services, automatic switching
 
 ## Native Windows
 
-Install Claude Code, uv, and Git as your normal Windows user. Open PowerShell in the cloned project:
+Use Claude Code's native Windows installer, which supplies **claude.exe**, and install uv and Git as your normal Windows user. Switchboard requires this executable to preserve multiline task arguments safely. Open PowerShell in the cloned project:
 
 ```powershell
 uv sync --python 3.14

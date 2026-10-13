@@ -11,6 +11,14 @@ Use the checks below on each operating system. Start through its launcher and ke
 
 The two-terminal chat continuation check below, native Windows, and older macOS hardware remain unverified.
 
+## Cross-platform extension checks
+
+The [native platform test run](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38384581089) passed all six jobs: Ubuntu, macOS, and Windows on Python 3.9 and 3.14. Windows checks exercised real terminal redraws, device-local Credential Manager storage, private-folder ACLs, and password-free Task Scheduler registration. The tests used disposable data and a fake Claude screen.
+
+Separately, an isolated Ubuntu 22.04 container verified real GNOME Keyring roundtrips at 524, 9,380, and 20,000 characters and validated the generated user-service file with systemd. It did not mount any user account profiles. The updated macOS monitor continued reporting live Claude session usage on port 56729.
+
+Real Claude account switching and sign-in startup on Linux/Windows, WSL, and older macOS hardware still need the desktop checks below. Passing native component checks does not complete those checks.
+
 ## 1. Check the dashboard
 
 - The top bar should say **Connected locally**.

@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 import background_monitor
 import launch
 import platform_runtime
+import rotator
 import secure_store
 import session_usage
 import shared_mode
@@ -20,6 +21,17 @@ from rotator import RotatorError
 
 
 class PlatformTests(unittest.TestCase):
+    def test_windows_prefers_native_claude_and_rejects_batch_argument_parsing(self):
+        config = rotator.Config("claude", "auto", 5, [])
+        with patch.object(rotator.sys, "platform", "win32"), \
+             patch.object(rotator.shutil, "which", return_value="C:/Claude/claude.exe") as find:
+            self.assertEqual(rotator.claude_binary(config), "C:/Claude/claude.exe")
+            find.assert_called_once_with("claude.exe")
+        config = rotator.Config("custom.cmd", "auto", 5, [])
+        with patch.object(rotator.sys, "platform", "win32"), \
+             patch.object(rotator.shutil, "which", return_value="C:/Claude/custom.cmd"):
+            with self.assertRaises(RotatorError):
+                rotator.claude_binary(config)
     def test_launcher_reopens_existing_private_dashboard(self):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)

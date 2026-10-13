@@ -34,7 +34,7 @@ uv run shared_mode.py disable
 
 `setup` imports signed-in profiles into the protected OS credential store. Turn switching off before preparing accounts again. `enable` installs a background monitor and a Claude `StopFailure` hook in `~/.claude/settings.json`, preserving existing hooks and saving a settings backup in `.shared-rotator/`. New Claude chats load the hook. `disable` removes the monitor and Switchboard's hook; the current shared login stays in place.
 
-The monitor uses a macOS launch agent, a Linux systemd user service, or a Windows Task Scheduler task for the current interactive user. No service runs as an administrator. Linux Secret Service must be available in that user's D-Bus session. Windows hooks use explicitly quoted PowerShell commands; macOS and Linux use the system shell.
+The monitor uses a macOS launch agent, a Linux systemd user service, or a Windows Task Scheduler task for the current interactive user. It requests no administrator elevation. Linux Secret Service must be available in that user's D-Bus session. Windows hooks use explicitly quoted PowerShell commands; macOS and Linux use the system shell.
 
 The monitor reads only the active account's current session percentage. Checks use a short-lived Claude session in safe mode and send `/usage`, without a model prompt. The terminal display is rendered with pyte so a refreshed percentage replaces earlier text. The reader waits for refreshing to finish and verifies the shared login before switching. It does not depend on Claude's local usage cache, which can remain stale. Claude's display format can change.
 

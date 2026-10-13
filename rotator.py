@@ -165,14 +165,21 @@ def profile_env(account: Account) -> dict[str, str]:
 
 
 def claude_binary(config: Config) -> str:
-    found = shutil.which(config.claude_command)
+    command = "claude.exe" if sys.platform == "win32" and config.claude_command == "claude" else config.claude_command
+    found = shutil.which(command)
     if not found and config.claude_command == "claude":
-        for candidate in (Path.home() / ".local/bin/claude.exe", Path.home() / ".local/bin/claude", Path("/opt/homebrew/bin/claude"),
-                          Path("/usr/local/bin/claude")):
+        candidates = ([Path.home() / ".local/bin/claude.exe"] if sys.platform == "win32"
+                      else [Path.home() / ".local/bin/claude", Path("/opt/homebrew/bin/claude"), Path("/usr/local/bin/claude")])
+        for candidate in candidates:
             if candidate.is_file() and os.access(candidate, os.X_OK):
-                return str(candidate)
+                found = str(candidate)
+                break
+        if not found and sys.platform == "win32":
+            found = shutil.which("claude")
     if not found:
         raise RotatorError(f"Claude Code command not found: {config.claude_command}")
+    if sys.platform == "win32" and Path(found).suffix.lower() in (".cmd", ".bat"):
+        raise RotatorError("The configured Claude command is a Windows batch file. Install Claude Code's native claude.exe to preserve task arguments safely.")
     return found
 
 
