@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import errno
 import os
+import platform
 from pathlib import Path
 import signal
 import subprocess
@@ -14,6 +15,18 @@ import time
 
 class RotatorError(Exception):
     pass
+
+
+def check_macos_version() -> None:
+    if sys.platform != "darwin":
+        return
+    version = platform.mac_ver()[0]
+    try:
+        major = int(version.split(".")[0])
+    except ValueError as exc:
+        raise RotatorError("Could not detect this Mac's version. Claude Auto Switch requires macOS 13 or later.") from exc
+    if major < 13:
+        raise RotatorError(f"This Mac runs macOS {version}. Claude Code requires macOS 13 or later. Update macOS before using Claude Auto Switch.")
 
 
 def powershell_env() -> dict[str, str]:

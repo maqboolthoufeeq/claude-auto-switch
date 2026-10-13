@@ -13,7 +13,7 @@ These OS minimums follow [Claude Code's published requirements](https://code.cla
 
 ## macOS
 
-Follow the [README](../README.md). Use **Open Switchboard.command** after the first `uv sync`. The same implementation targets Intel and Apple Silicon; uv selects the matching Python architecture.
+Follow the [README](../README.md). Use **Open Switchboard.command** after the first `uv sync`. The same implementation targets Intel and Apple Silicon; uv selects the matching Python architecture. Launching on macOS before 13 shows a clear update requirement before creating account data. CI runs the suite on macOS 14 with Python 3.9 and macOS 15 Intel with Python 3.14, including disposable LaunchAgent startup, replacement and stop checks. macOS 13 still needs a hardware check: GitHub has retired that runner.
 
 ## Ubuntu and Linux desktops
 

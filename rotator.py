@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from platform_runtime import RotatorError, file_lock, interrupt_process, process_options, private_directory
+from platform_runtime import RotatorError, file_lock, interrupt_process, process_options, private_directory, check_macos_version
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -165,6 +165,7 @@ def profile_env(account: Account) -> dict[str, str]:
 
 
 def claude_binary(config: Config) -> str:
+    check_macos_version()
     command = "claude.exe" if sys.platform == "win32" and config.claude_command == "claude" else config.claude_command
     found = shutil.which(command)
     if not found and config.claude_command == "claude":
