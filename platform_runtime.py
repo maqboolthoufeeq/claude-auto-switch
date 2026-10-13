@@ -16,6 +16,11 @@ class RotatorError(Exception):
     pass
 
 
+def powershell_env() -> dict[str, str]:
+    # Python inherits PowerShell 7 module paths, which Windows PowerShell 5.1 cannot load.
+    return {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+
+
 def private_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if sys.platform != "win32":
@@ -32,7 +37,7 @@ def private_directory(path: Path) -> None:
         "'ContainerInherit, ObjectInherit', 'None', 'Allow'); $acl.AddAccessRule($rule) }; "
         "Set-Acl -LiteralPath $env:SWITCHBOARD_PRIVATE_PATH -AclObject $acl"
     )
-    env = dict(os.environ, SWITCHBOARD_PRIVATE_PATH=str(path.resolve()))
+    env = dict(powershell_env(), SWITCHBOARD_PRIVATE_PATH=str(path.resolve()))
     try:
         result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", script],
                                 env=env, capture_output=True, timeout=20, check=False)
@@ -123,7 +128,8 @@ def choose_folder() -> str:
             raise RotatorError("Enter the project folder path, or install zenity or kdialog to use the folder picker")
     else:
         raise RotatorError("Enter the project folder path on this computer")
-    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=120, check=False)
+    result = subprocess.run(command, env=powershell_env() if sys.platform == "win32" else None,
+                            capture_output=True, text=True, encoding="utf-8", timeout=120, check=False)
     if result.returncode != 0 or not result.stdout.strip():
         raise RotatorError("No folder was selected")
     return result.stdout.strip()

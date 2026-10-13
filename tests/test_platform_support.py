@@ -190,7 +190,7 @@ class PlatformTests(unittest.TestCase):
                 "if ($acl.AreAccessRulesProtected -and $rules.Count -eq 2 -and $bad.Count -eq 0) { exit 0 } else { exit 1 }"
             )
             result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", script],
-                                    env=dict(os.environ, SWITCHBOARD_TEST_PATH=str(path)), capture_output=True, timeout=20)
+                                    env=dict(platform_runtime.powershell_env(), SWITCHBOARD_TEST_PATH=str(path)), capture_output=True, timeout=20)
             self.assertEqual(result.returncode, 0, "Private-folder ACL did not restrict access to the expected principals")
 
     @unittest.skipUnless(sys.platform == "win32", "Requires native Windows Task Scheduler")
