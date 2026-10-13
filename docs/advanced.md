@@ -2,6 +2,24 @@
 
 For the dashboard setup, start with the [README](../README.md).
 
+## Update an existing installation
+
+1. Finish or pause any guided task. Turn off automatic switching in the dashboard, then close the dashboard launcher.
+2. Open a terminal in the existing Switchboard project folder and run:
+
+   ```sh
+   git pull --ff-only
+   uv sync
+   uv run launch.py
+   ```
+
+   On native Windows, use `uv sync --python 3.14` for the install step.
+
+3. Check the account route, then turn automatic switching back on. Linux needs an unlocked desktop credential store; Windows needs the same signed-in user.
+4. Confirm that the session usage reading updates. Follow the [background and startup checks](testing.md#4-test-fallback-and-background-operation) before relying on the monitor.
+
+Updating in the same folder keeps your local configuration and profiles. Do not delete them or copy credentials into Git. If Git reports local source changes, review those changes before updating; do not discard them to force the update. Continue using port **56729**.
+
 ## Account profiles
 
 `rotator.json` is your local configuration. Create it with `uv run rotator.py init`. It starts with five profiles; the dashboard can add or remove accounts.
@@ -36,7 +54,7 @@ uv run shared_mode.py disable
 
 The monitor uses a macOS LaunchAgent, a Linux systemd user service, or a Windows Task Scheduler task for the current interactive user. It requests no administrator elevation. Linux Secret Service must be available in that user's D-Bus session. Windows hooks use explicitly quoted PowerShell commands; macOS and Linux use the system shell.
 
-For the startup and cleanup changes in the platform feature branches, see [current availability](platform-support.md#current-availability). Their implementations:
+The platform improvements are merged into `main`; see [availability and verification](platform-support.md#current-availability). Background behavior:
 
 - **Linux:** import only current desktop session variables into the systemd manager, keep those addresses out of the unit file, use `Type=exec`, confirm the service is active before enabling startup, and stop its full process group when disabled.
 - **Windows:** stop an older scheduled monitor before replacement, check its numeric running state through Task Scheduler, and keep descendants in a private kill-on-close job object. The job contains monitor descendants, not your existing Claude terminals.

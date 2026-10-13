@@ -3,11 +3,14 @@
 import urllib.request
 import webbrowser
 
+from platform_runtime import check_macos_version
+
 from rotator import BASE_DIR, RotatorError, main as rotator_main
 from rotator_ui import main as dashboard_main
 
 
 def main() -> int:
+    check_macos_version()
     try:
         link = (BASE_DIR / ".shared-rotator" / "dashboard-url").read_text().strip()
         if link.startswith("http://127.0.0.1:56729/#token="):

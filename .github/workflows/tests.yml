@@ -14,6 +14,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ['3.9', '3.14']
+        include:
+          - os: macos-14
+            python: '3.9'
+          - os: macos-15-intel
+            python: '3.14'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -27,5 +32,26 @@ jobs:
         run: uv sync --frozen --group tests --python "${{ matrix.python }}"
       - name: Run tests
         run: uv run --frozen --group tests python -B -m unittest discover -s tests -v
+        env:
+          SWITCHBOARD_TEST_LAUNCHD: '1'
       - name: Check dashboard JavaScript
         run: node --check ui/app.js
+
+  linux-service:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Start an isolated runner user service manager
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Verify actual service startup, restart and child cleanup
+        run: python -B -m unittest discover -s tests -p test_linux_service.py -v
+        env:
+          SWITCHBOARD_TEST_SYSTEMD: '1'

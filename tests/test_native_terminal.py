@@ -35,6 +35,9 @@ class NativeTerminalTests(unittest.TestCase):
             directory.mkdir()
             path = directory / "fake-usage"
             if sys.platform == "win32":
+                # Run the real terminal adapter inside the same job used by the background monitor.
+                from platform_runtime import windows_monitor_job
+                windows_monitor_job()
                 from winpty import PTY as RealPTY
                 script = path.with_suffix(".py")
                 script.write_text(PROGRAM)

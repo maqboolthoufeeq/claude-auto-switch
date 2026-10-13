@@ -4,13 +4,13 @@ Claude Auto Switch uses the same dashboard on every platform at **http://127.0.0
 
 ## Current availability
 
-**Status checked October 13, 2026.** `main` includes the initial Linux and Windows preview adapters. The following improvements are in separate, open PRs; they are available on their feature branches until merged:
+**Updated October 13, 2026.** All three platform improvements below are merged into `main` at `cc21d12`. New installations get them through the README quick start. For an existing installation, follow the [upgrade steps](advanced.md#update-an-existing-installation).
 
-| Change | Branch | PR |
-| --- | --- | --- |
-| Linux monitor startup checks, current desktop environment, and process cleanup tests | `feature/linux-monitor-lifecycle` | [Ubuntu/Linux #1](https://github.com/maqboolthoufeeq/claude-auto-switch/pull/1) |
-| Windows monitor replacement, startup checks, and automatic child-process cleanup | `feature/windows-monitor-lifecycle` | [Windows #2](https://github.com/maqboolthoufeeq/claude-auto-switch/pull/2) |
-| macOS version validation and real LaunchAgent tests on older and Intel runners | `feature/older-macos-compatibility` | [macOS #3](https://github.com/maqboolthoufeeq/claude-auto-switch/pull/3) |
+| Change | Merged PR |
+| --- | --- |
+| Linux monitor startup checks, current desktop environment, and process cleanup tests | [Ubuntu/Linux #1](https://github.com/maqboolthoufeeq/claude-auto-switch/pull/1) |
+| Windows monitor replacement, startup checks, and automatic child-process cleanup | [Windows #2](https://github.com/maqboolthoufeeq/claude-auto-switch/pull/2) |
+| macOS version validation and real LaunchAgent tests on older and Intel runners | [macOS #3](https://github.com/maqboolthoufeeq/claude-auto-switch/pull/3) |
 
 For the exact tested revisions and passing CI links, see the [testing guide](testing.md#verified-platform-checks).
 
@@ -36,7 +36,7 @@ All platforms need Claude Code, [uv](https://docs.astral.sh/uv/getting-started/i
 
 New installations do not need the Swift helper. It is retained only for recovering older Switchboard Keychain entries; see [migration](advanced.md#shared-login-controls).
 
-The macOS PR checks the OS version before starting the dashboard or resolving Claude and gives an update message on unsupported Macs. Its CI tests real LaunchAgent startup, replacement, and removal on macOS 14 / Python 3.9 and macOS 15 Intel / Python 3.14, as well as latest Mac runners. macOS 13 needs a physical-machine check because its hosted runner is retired.
+The launcher checks the OS version before starting the dashboard or resolving Claude and gives an update message on unsupported Macs. CI tests real LaunchAgent startup, replacement, and removal on macOS 14 / Python 3.9 and macOS 15 Intel / Python 3.14, as well as latest Mac runners. macOS 13 needs a physical-machine check because its hosted runner is retired.
 
 ## Ubuntu and Linux desktops
 
@@ -53,7 +53,7 @@ The macOS PR checks the OS version before starting the dashboard or resolving Cl
 
 Zenity or KDialog supplies the optional folder picker. You can type the project path if neither is installed. Installing system packages may require administrator permission; running Switchboard and its monitor uses your ordinary user account.
 
-The Linux PR imports current desktop session addresses into the systemd user manager instead of saving them in the service file. It checks that the service is active before enabling startup. Stopping the service also stops its temporary usage readers. Real startup, replacement, and cleanup were tested with a disposable Ubuntu 22.04 service; this does not establish desktop logout/login behavior.
+The Linux monitor imports current desktop session addresses into the systemd user manager instead of saving them in the service file. It checks that the service is active before enabling startup. Stopping the service also stops its temporary usage readers. Real startup, replacement, and cleanup were tested with a disposable Ubuntu 22.04 service; this does not establish desktop logout/login behavior.
 
 Headless servers, non-systemd Linux, and WSL are not verified setups. Do not disable credential-store encryption to work around a missing desktop session.
 
@@ -74,7 +74,7 @@ The current terminal dependency provides x64 and ARM64 wheels with Python 3.10+.
 
 Turning on switching creates a Task Scheduler task for the current user. It is configured to start immediately and at sign-in, with ordinary user permissions and **no saved Windows password**. It runs only while that user is signed in. Turning switching off removes the task. Organization policies can restrict task creation; Switchboard reports registration failures.
 
-The Windows PR stops an older monitor before replacing it and confirms that the new task is running. A private Windows job object cleans up temporary readers when the monitor is terminated. Native CI verifies execution and cleanup using harmless processes. Actual desktop sign-in startup still needs the checklist in the testing guide.
+The Windows monitor stops an older monitor before replacing it and confirms that the new task is running. A private Windows job object cleans up temporary readers when the monitor is terminated. Native CI verifies execution and cleanup using harmless processes. Actual desktop sign-in startup still needs the checklist in the testing guide.
 
 The folder picker and private-folder permissions use built-in Windows PowerShell. Keep native Windows and WSL installations separate: each has its own active Claude login and credential store.
 

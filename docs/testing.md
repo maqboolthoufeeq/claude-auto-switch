@@ -4,16 +4,17 @@ Use the checks below on each operating system. Start through its launcher and ke
 
 ## Verified platform checks
 
-**Evidence recorded October 13, 2026.** The platform PRs were open when these results were recorded; see [current availability](platform-support.md#current-availability) for their branches. Each link below identifies a passing CI run for the stated revision.
+**Evidence recorded October 13, 2026.** The three platform PRs are merged into `main`. The combined revision `cc21d12` passed all nine CI jobs. Each link below identifies the tested revision; the earlier feature runs show the individual changes.
 
 | Code tested | Revision | CI result | What it adds |
 | --- | --- | --- | --- |
-| `main` baseline | `33b31a9` | [6 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38385324784) | Ubuntu, macOS, and Windows on Python 3.9 and 3.14; native terminal and lock tests; Windows credential store, private folders, and task registration |
+| Before platform improvements | `33b31a9` | [6 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38385324784) | Ubuntu, macOS, and Windows on Python 3.9 and 3.14; native terminal and lock tests; Windows credential store, private folders, and task registration |
 | Ubuntu/Linux PR #1 | `263dfbf` | [7 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38388065937) | Real disposable systemd user service startup, replacement, and complete process cleanup on Ubuntu 22.04 |
 | Windows PR #2 | `e8292fd` | [6 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38388300818) | Real scheduled-task execution and child cleanup after task termination; terminal reading inside the monitor's job object |
 | macOS PR #3 | `0c34482` | [8 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38388381966) | Real LaunchAgent startup, replacement, and stop; macOS 14 / Python 3.9 and macOS 15 Intel / Python 3.14 |
+| Merged `main` | `cc21d12` | [9 jobs passed](https://github.com/maqboolthoufeeq/claude-auto-switch/actions/runs/38392172818) | All three improvements together, including the separate Ubuntu 22.04 service job and older/Intel Mac runners |
 
-The three PRs also combined without merge conflicts. A disposable combined source snapshot ran 55 tests on the development Mac: **50 passed and 5 platform-specific checks were skipped**. This was a local integration check, not a merged release or CI run of the combined code.
+The three PRs also combined without merge conflicts. A disposable combined source snapshot ran 55 tests on the development Mac: **50 passed and 5 platform-specific checks were skipped**. This local integration check preceded the passing merged-main CI run linked above.
 
 Additional checks:
 
@@ -103,20 +104,20 @@ uv run --group tests python -B -m unittest discover -s tests -v
 node --check ui/app.js
 ```
 
-The suite uses fake Claude responses and disposable credentials, not your accounts. Native Windows checks write and delete test Credential Manager entries; on the Windows feature branch, they also run a harmless scheduled task and test process cleanup.
+The suite uses fake Claude responses and disposable credentials, not your accounts. Native Windows checks write and delete test Credential Manager entries; on native Windows, they also run a harmless scheduled task and test process cleanup.
 
-On the macOS feature branch, the LaunchAgent test is opt-in outside CI. It creates and removes a unique disposable agent:
+On macOS, the LaunchAgent test is opt-in outside CI. It creates and removes a unique disposable agent:
 
 ```sh
 SWITCHBOARD_TEST_LAUNCHD=1 uv run --group tests python -B -m unittest discover -s tests -p test_macos_agent.py -v
 ```
 
-On the Linux feature branch, run the service test only inside a working systemd user session. It creates and removes a unique disposable service:
+On Linux, run the service test only inside a working systemd user session. It creates and removes a unique disposable service:
 
 ```sh
 SWITCHBOARD_TEST_SYSTEMD=1 uv run --group tests python -B -m unittest discover -s tests -p test_linux_service.py -v
 ```
 
-These two files are introduced by their platform PRs; they are not in the recorded `main` baseline. Do not opt in from a machine without the matching OS session. Normal test runs skip them unless enabled. CI enables the Mac probe on Mac runners and uses a separate Ubuntu 22.04 service job for Linux.
+Both tests are included in merged `main`. Do not opt in from a machine without the matching OS session. Normal test runs skip them unless enabled. CI enables the Mac probe on Mac runners and uses a separate Ubuntu 22.04 service job for Linux.
 
-The baseline CI matrix is Ubuntu, macOS, and Windows on Python 3.9 and 3.14. The Mac PR adds the older/Intel runners listed above. Real GNOME Keyring was checked separately in an isolated Ubuntu container. Repeat the desktop checklist on each actual machine; successful component tests do not establish live account switching or login startup.
+CI runs Ubuntu, macOS, and Windows on Python 3.9 and 3.14, plus macOS 14 / Python 3.9, macOS 15 Intel / Python 3.14, and a separate Ubuntu 22.04 systemd service job. Real GNOME Keyring was checked separately in an isolated Ubuntu container. Repeat the desktop checklist on each actual machine; successful component tests do not establish live account switching or login startup.

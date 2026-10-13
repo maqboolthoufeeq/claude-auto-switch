@@ -16,7 +16,7 @@ You need [Claude Code](https://code.claude.com/docs/en/setup) 2.1.259 or newer, 
 | Ubuntu 20.04+, Debian 10+, other Linux desktops | systemd user services and an unlocked Secret Service, such as GNOME Keyring |
 | Windows 10 1809+ or Windows 11 | Native `claude.exe` and permission to create a task for your signed-in user |
 
-Linux and Windows remain **preview** ports: native components are tested, but live Claude switching and sign-in startup need desktop checks. See [platform setup and current PR status](docs/platform-support.md) for installation steps and the latest changes.
+Linux and Windows remain **preview** ports: native components are tested, but live Claude switching and sign-in startup need desktop checks. See [platform setup and verification](docs/platform-support.md) for installation steps and the latest changes.
 
 ## Get started
 
@@ -54,6 +54,8 @@ Profiles are created automatically in `profile/`. No passwords or `.env` file ar
 5. Open new Claude chats in your project terminals using the normal `claude` command.
 
 The monitor checks usage about every 30 seconds and switches when a check observes the saved threshold. It keeps running after you close the dashboard. Switchboard changes the shared login without restarting your terminals; retry an interrupted message after switching. Before relying on existing chats continuing under the new account, complete the [two-terminal check](docs/testing.md#2-test-two-open-claude-chats).
+
+Already installed? Follow the [upgrade steps](docs/advanced.md#update-an-existing-installation) to update the code and background monitor.
 
 ## Everyday use
 
