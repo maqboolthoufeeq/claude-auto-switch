@@ -23,7 +23,7 @@ Install Claude Code, uv, and Git, then follow the README. A working **systemd us
 sudo apt install gnome-keyring dbus-user-session zenity
 ```
 
-Sign in to your desktop normally and unlock its keyring. The monitor imports your current desktop session environment into systemd without saving session addresses in its service file. It confirms the service is active before enabling startup, and stopping it also stops its temporary usage readers. Switchboard does not save the keyring password. A compatible Secret Service provider can replace GNOME Keyring; an arbitrary or plaintext Python keyring backend cannot.
+Sign in to your desktop normally and unlock its keyring. Switchboard does not save the keyring password. A compatible Secret Service provider can replace GNOME Keyring; an arbitrary or plaintext Python keyring backend cannot.
 
 Start with `uv run launch.py`, then use **Open Switchboard.sh**. Zenity or KDialog supplies the optional folder picker; you can also type a project path.
 
@@ -49,5 +49,3 @@ The folder picker and private-folder access controls use the built-in Windows Po
 Follow [testing.md](testing.md), including the two-terminal continuation test. A passed simulated test or a changed route marker alone does not verify that an already-open Claude chat adopted the new account.
 
 All platforms keep account names, per-account session thresholds, manual switching, and the user-controlled limit fallback. Weekly usage is still not used for switching.
-
-Ubuntu 22.04 CI includes a disposable systemd user service test for actual startup, replacement, and process cleanup. It does not sign in to Claude or simulate a desktop login.
