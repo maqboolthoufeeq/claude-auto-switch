@@ -165,6 +165,9 @@ class PlatformTests(unittest.TestCase):
             raw = "test-only-value-" * 1000
             shared_mode.keychain_write(name, raw)
             self.assertEqual(shared_mode.vault_read(name), raw)
+            from win32ctypes.pywin32 import win32cred
+            item = win32cred.CredRead(Type=win32cred.CRED_TYPE_GENERIC, TargetName=name)
+            self.assertEqual(item["Persist"], win32cred.CRED_PERSIST_LOCAL_MACHINE)
         finally:
             shared_mode.vault_delete(name)
 

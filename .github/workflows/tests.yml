@@ -24,8 +24,8 @@ jobs:
       - name: Install uv
         run: python -m pip install uv
       - name: Install platform dependencies
-        run: uv sync --frozen --python "${{ matrix.python }}"
+        run: uv sync --frozen --group tests --python "${{ matrix.python }}"
       - name: Run tests
-        run: uv run --frozen python -B -m unittest discover -s tests -v
+        run: uv run --frozen --group tests python -B -m unittest discover -s tests -v
       - name: Check dashboard JavaScript
         run: node --check ui/app.js

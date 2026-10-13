@@ -8,3 +8,8 @@ dependencies = [
     "pywinpty>=2.0.15,<3 ; python_full_version < '3.10' and sys_platform == 'win32'",
     "pywinpty>=3.0.5,<4 ; python_full_version >= '3.10' and sys_platform == 'win32'",
 ]
+
+[dependency-groups]
+tests = [
+    "distlib>=0.4,<0.5 ; sys_platform == 'win32'",
+]

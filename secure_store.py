@@ -12,7 +12,9 @@ def backend():
     try:
         if sys.platform == "win32":
             from keyring.backends.Windows import WinVaultKeyring
-            return WinVaultKeyring()
+            store = WinVaultKeyring()
+            store.persist = "local machine"
+            return store
         if sys.platform.startswith("linux"):
             from keyring.backends.SecretService import Keyring
             return Keyring()

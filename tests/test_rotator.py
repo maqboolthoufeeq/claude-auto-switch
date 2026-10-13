@@ -132,7 +132,8 @@ class RotatorIntegrationTests(unittest.TestCase):
         login = self.call("login", "account-1")
         self.assertEqual(login.returncode, 0, login.stdout + login.stderr)
         self.assertTrue((self.project / "profile" / "account-1").is_dir())
-        self.assertEqual((self.project / "profile" / "account-1").stat().st_mode & 0o777, 0o700)
+        if sys.platform != "win32":
+            self.assertEqual((self.project / "profile" / "account-1").stat().st_mode & 0o777, 0o700)
         self.assertEqual(json.loads((self.trace / "login.json").read_text())["argv"],
                          ["auth", "login", "--email", "one@example.com"])
 

@@ -65,7 +65,8 @@ Include the action, the expected result, the actual result, your operating syste
 ## Run the automated tests
 
 ```sh
-uv run python -B -m unittest discover -s tests -v
+uv sync --group tests
+uv run --group tests python -B -m unittest discover -s tests -v
 node --check ui/app.js
 ```
 

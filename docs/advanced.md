@@ -80,11 +80,13 @@ The command must print a number from 0 to 100, or JSON such as `{"used_percent":
 Python 3.9 or newer is required and managed by uv. `uv sync` installs pyte, keyring on Linux/Windows, and pywinpty on Windows. Python 3.10+ is recommended on native Windows for current terminal wheels, including ARM64. Python 3.9 uses the older pywinpty 2 release.
 
 ```sh
-uv sync
-uv run python -B -m unittest discover -s tests -v
+uv sync --group tests
+uv run --group tests python -B -m unittest discover -s tests -v
 node --check ui/app.js
 ```
 
 Tests simulate Claude; they do not contact Anthropic or use your accounts. They exercise real terminal I/O and file locks, and create/remove disposable Windows credential entries when run on Windows. GitHub Actions runs the suite on macOS, Ubuntu, and Windows with Python 3.9 and 3.14.
+
+The optional `tests` dependency group installs PyPA distlib only on Windows to generate real executable test launchers. Batch-file stubs cannot preserve all Claude arguments, especially multiline prompts; runtime installations do not need this test dependency.
 
 The runner removes inherited API-key and provider-routing variables and verifies a `claude.ai` login before using a profile. It uses Claude's `auto` permission mode and preserves organization policies. On Windows, private runtime/profile folders receive a protected ACL allowing the current user and SYSTEM; Unix folders use mode 0700. Do not place profiles on shared folders or copy the private dashboard link to other users.
