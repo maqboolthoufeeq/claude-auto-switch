@@ -22,6 +22,27 @@ from rotator import RotatorError
 
 
 class PlatformTests(unittest.TestCase):
+    def test_macos_version_floor_allows_supported_older_versions(self):
+        with patch.object(platform_runtime.sys, "platform", "darwin"):
+            for version in ("13.0", "13.7.8", "14.0", "15.4", "26.0"):
+                with self.subTest(version=version), patch.object(platform_runtime.platform, "mac_ver", return_value=(version, (), "")):
+                    platform_runtime.check_macos_version()
+            with patch.object(platform_runtime.platform, "mac_ver", return_value=("12.7.6", (), "")):
+                with self.assertRaisesRegex(RotatorError, "requires macOS 13"):
+                    platform_runtime.check_macos_version()
+            with patch.object(platform_runtime.platform, "mac_ver", return_value=("", (), "")):
+                with self.assertRaisesRegex(RotatorError, "Could not detect"):
+                    platform_runtime.check_macos_version()
+
+    def test_launcher_rejects_unsupported_mac_before_creating_user_data(self):
+        with patch.object(launch, "check_macos_version", side_effect=RotatorError("requires macOS 13")), \
+             patch.object(launch, "rotator_main") as initialize, \
+             patch.object(launch, "dashboard_main") as dashboard:
+            with self.assertRaises(RotatorError):
+                launch.main()
+            initialize.assert_not_called()
+            dashboard.assert_not_called()
+
     def test_windows_prefers_native_claude_and_rejects_batch_argument_parsing(self):
         config = rotator.Config("claude", "auto", 5, [])
         with patch.object(rotator.sys, "platform", "win32"), \

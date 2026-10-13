@@ -29,6 +29,7 @@ from session_usage import read_session_usage
 from platform_runtime import file_lock, private_directory, windows_monitor_job
 import secure_store
 import background_monitor
+from platform_runtime import check_macos_version
 
 
 STATE_DIR = BASE_DIR / ".shared-rotator"
@@ -39,7 +40,8 @@ COOLDOWN_SECONDS = 5 * 60 * 60
 
 def require_macos() -> None:
     if sys.platform != "darwin":
-        raise RotatorError("Shared-login mode currently requires macOS Keychain")
+        raise RotatorError("This Keychain operation requires macOS")
+    check_macos_version()
 
 
 def base_env() -> dict[str, str]:
