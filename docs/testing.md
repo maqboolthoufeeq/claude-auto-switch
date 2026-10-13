@@ -2,6 +2,15 @@
 
 Start with the checks below on your Mac. Use the launcher to open the dashboard on port **56729**.
 
+## Verified on October 13, 2026
+
+- A real background check read the current session percentage from Claude's rendered `/usage` screen. At 10% usage and a saved 10% threshold, it switched from account-5 to account-1. Claude's shared account identity was verified after the switch.
+- A rejected account-6 login was skipped. That account needs a fresh sign-in and preparation before it can rejoin rotation.
+- Disposable Keychain values of 524, 9,380, and 20,000 characters were written, read back exactly, updated, and removed. All six prepared credentials were checked for complete, readable JSON; this does not prove all six refresh tokens are still accepted by Claude.
+- All 32 automated tests passed on macOS with Python 3.9 and 3.14, and in isolated Ubuntu 22.04 with Python 3.10. Ubuntu tests used simulated credentials and Claude; Linux shared switching is not implemented yet.
+
+The two-terminal chat continuation check below, native Windows, and older macOS hardware remain unverified.
+
 ## 1. Check the dashboard
 
 - The top bar should say **Connected locally**.
