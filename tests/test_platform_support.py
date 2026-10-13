@@ -1,3 +1,4 @@
+import io
 import json
 import os
 from pathlib import Path
@@ -6,10 +7,11 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 import xml.etree.ElementTree as ET
 
 import background_monitor
+import launch
 import platform_runtime
 import secure_store
 import session_usage
@@ -18,6 +20,40 @@ from rotator import RotatorError
 
 
 class PlatformTests(unittest.TestCase):
+    def test_launcher_reopens_existing_private_dashboard(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            (directory / ".shared-rotator").mkdir()
+            link = "http://127.0.0.1:56729/#token=test-only"
+            (directory / ".shared-rotator" / "dashboard-url").write_text(link)
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = b"<title>Switchboard</title>"
+            with patch.object(launch, "BASE_DIR", directory), \
+                 patch.object(launch.urllib.request, "urlopen", return_value=response), \
+                 patch.object(launch.webbrowser, "open") as browser, \
+                 patch.object(launch, "dashboard_main") as start:
+                self.assertEqual(launch.main(), 0)
+                browser.assert_called_once_with(link)
+                start.assert_not_called()
+
+    def test_launcher_creates_first_config_in_its_project_not_working_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root) / "app"
+            directory.mkdir()
+            elsewhere = Path(root) / "other project"
+            elsewhere.mkdir()
+            previous = Path.cwd()
+            try:
+                os.chdir(elsewhere)
+                with patch.object(launch, "BASE_DIR", directory), \
+                     patch.object(launch, "dashboard_main", return_value=0), \
+                     patch("sys.stdout", new=io.StringIO()):
+                    self.assertEqual(launch.main(), 0)
+                self.assertTrue((directory / "rotator.json").is_file())
+                self.assertFalse((elsewhere / "rotator.json").exists())
+            finally:
+                os.chdir(previous)
+
     def test_lock_rejects_a_concurrent_run_and_releases(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "lock"
@@ -136,7 +172,16 @@ class PlatformTests(unittest.TestCase):
     def test_native_windows_private_folder_allows_only_user_and_system(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "private folder with spaces"
-            platform_runtime.private_directory(path)
+            real_run = subprocess.run
+            def diagnostic_run(*args, **kwargs):
+                result = real_run(*args, **kwargs)
+                if result.returncode:
+                    # This test uses only disposable paths and a static ACL script, never account data.
+                    detail = result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, bytes) else result.stderr
+                    print("Disposable ACL test diagnostic:", detail[-2500:])
+                return result
+            with patch.object(platform_runtime.subprocess, "run", side_effect=diagnostic_run):
+                platform_runtime.private_directory(path)
             script = (
                 "$acl = Get-Acl -LiteralPath $env:SWITCHBOARD_TEST_PATH; "
                 "$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "

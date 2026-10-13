@@ -96,6 +96,7 @@ class SharedModeTests(unittest.TestCase):
             patch.object(shared_mode, "STATE_DIR", self.root / "state"),
             patch.object(shared_mode, "STATE_FILE", self.root / "state" / "state.json"),
             patch.object(shared_mode, "require_macos"),
+            patch.object(shared_mode, "private_directory", side_effect=lambda path: path.mkdir(parents=True, exist_ok=True)),
             patch.object(shared_mode, "claude_binary", return_value="/fake/claude"),
             patch.object(shared_mode, "keychain_read", side_effect=self.keychain_read),
             patch.object(shared_mode, "claude_credential", side_effect=lambda directory: self.keychain_read(shared_mode.keychain_service(directory))),
@@ -256,6 +257,7 @@ class SharedModeTests(unittest.TestCase):
         path = self.root / "LaunchAgents" / "switchboard.plist"
         with patch.object(shared_mode, "agent_path", return_value=("switchboard.test", path)), \
              patch.object(shared_mode.sys, "platform", "darwin"), \
+             patch.object(shared_mode.os, "getuid", return_value=1000, create=True), \
              patch.object(shared_mode.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
             shared_mode.install_agent(self.config_path)
         value = plistlib.loads(path.read_bytes())

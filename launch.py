@@ -18,7 +18,7 @@ def main() -> int:
     except OSError:
         pass
     if not (BASE_DIR / "rotator.json").exists():
-        rotator_main(["init"])
+        rotator_main(["--config", str(BASE_DIR / "rotator.json"), "init"])
     return dashboard_main()
 
 

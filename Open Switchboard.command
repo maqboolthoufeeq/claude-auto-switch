@@ -13,12 +13,12 @@ if [[ -r "$dashboard_link" ]] &&
 fi
 
 if command -v uv >/dev/null 2>&1; then
-  exec uv run --offline rotator_ui.py
+  exec uv run --offline launch.py
 fi
 
 for uv_path in "$HOME/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
   if [[ -x "$uv_path" ]]; then
-    exec "$uv_path" run --offline rotator_ui.py
+    exec "$uv_path" run --offline launch.py
   fi
 done
 
