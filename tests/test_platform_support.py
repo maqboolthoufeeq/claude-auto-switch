@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, Mock, patch
@@ -107,6 +108,62 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(root.findtext("t:Principals/t:Principal/t:RunLevel", namespaces=ns), "LeastPrivilege")
         self.assertEqual(root.findtext("t:Actions/t:Exec/t:Arguments", namespaces=ns), subprocess.list2cmdline(argv[1:]))
         self.assertNotIn("Password", data.decode("utf-16"))
+
+    def test_windows_install_replaces_existing_task_and_waits_for_running_state(self):
+        with tempfile.TemporaryDirectory() as root:
+            with patch.object(background_monitor.sys, "platform", "win32"), \
+                 patch.object(background_monitor, "windows_task", return_value=b"test-only"), \
+                 patch.object(background_monitor.subprocess, "run") as stop, \
+                 patch.object(background_monitor, "run_checked") as run, \
+                 patch.object(background_monitor, "wait_windows_task") as wait:
+                config = Path(root) / "config.json"
+                background_monitor.install(config, Path(root), Path(root) / "monitor.py")
+                self.assertEqual(stop.call_args.args[0][1], "/End")
+                self.assertEqual([call.args[0][1] for call in run.call_args_list], ["/Create", "/Run"])
+                wait.assert_called_once_with(background_monitor.identity(config))
+
+    def test_windows_task_start_failure_is_actionable_and_does_not_claim_success(self):
+        counter = iter([0, 0, 11])
+        with patch.object(background_monitor.time, "monotonic", side_effect=lambda: next(counter)), \
+             patch.object(background_monitor.time, "sleep"), \
+             patch.object(background_monitor.subprocess, "run", return_value=SimpleNamespace(returncode=1)):
+            with self.assertRaisesRegex(RotatorError, "Sign in to Windows"):
+                background_monitor.wait_windows_task("test-only-task")
+
+    @unittest.skipUnless(sys.platform == "win32", "Requires native Windows job objects")
+    def test_native_windows_monitor_exit_kills_its_child(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32")
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root) / "child.pid"
+            code = ("from platform_runtime import windows_monitor_job; windows_monitor_job(); "
+                    "import subprocess,sys,time; from pathlib import Path; "
+                    "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(180)']); "
+                    f"Path({str(marker)!r}).write_text(str(child.pid)); time.sleep(180)")
+            process = subprocess.Popen([sys.executable, "-B", "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            handle = None
+            try:
+                deadline = time.monotonic() + 15
+                while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                self.assertTrue(marker.exists(), "Windows job could not launch the harmless child")
+                pid = int(marker.read_text())
+                handle = kernel.OpenProcess(0x100000, False, pid)  # SYNCHRONIZE
+                self.assertTrue(handle)
+                process.terminate()
+                process.wait(timeout=10)
+                self.assertEqual(kernel.WaitForSingleObject(handle, 5000), 0, "Monitor left a child alive")
+            finally:
+                if process.poll() is None:
+                    platform_runtime.kill_windows_tree(process.pid)
+                process.communicate(timeout=10)
+                if handle:
+                    kernel.CloseHandle(handle)
 
     def test_windows_hook_quotes_special_paths_for_powershell(self):
         with tempfile.TemporaryDirectory() as root:
@@ -214,12 +271,22 @@ class PlatformTests(unittest.TestCase):
         name = "switchboard-test-" + uuid.uuid4().hex
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "task.xml"
-            path.write_bytes(background_monitor.windows_task([sys.executable, "-c", "pass"]))
+            marker = Path(root) / "started.txt"
+            probe = Path(root) / "harmless probe.py"
+            probe.write_text("from pathlib import Path; import time; " + f"Path({str(marker)!r}).write_text('ready'); time.sleep(120)", encoding="utf-8")
+            path.write_bytes(background_monitor.windows_task([sys.executable, str(probe)]))
             try:
                 result = subprocess.run(["schtasks", "/Create", "/TN", name, "/XML", str(path), "/F"],
                                         capture_output=True, timeout=30)
                 self.assertEqual(result.returncode, 0, "The current-user task XML could not be registered")
+                background_monitor.run_checked(["schtasks", "/Run", "/TN", name], "Cannot run disposable task")
+                background_monitor.wait_windows_task(name)
+                deadline = time.monotonic() + 15
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                self.assertTrue(marker.exists(), "Task Scheduler did not execute the harmless monitor")
             finally:
+                subprocess.run(["schtasks", "/End", "/TN", name], capture_output=True, timeout=20)
                 subprocess.run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True, timeout=20)
 
 

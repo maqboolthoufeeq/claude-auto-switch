@@ -40,7 +40,7 @@ uv run launch.py
 
 Then use **Open Switchboard.cmd**. The Windows terminal dependency has current x64 and ARM64 wheels for Python 3.10+. Python 3.9 is retained for compatibility with the older x64 terminal dependency.
 
-Turning on automatic switching creates a Task Scheduler task for your current user. It starts immediately and at your next sign-in, with ordinary user permissions and no saved Windows password. It watches only while that user is signed in. Turning switching off removes the task. Your organization may restrict task registration; Switchboard reports that failure instead of silently claiming monitoring is active.
+Turning on automatic switching creates a Task Scheduler task for your current user. It starts immediately and at your next sign-in, with ordinary user permissions and no saved Windows password. It watches only while that user is signed in. Turning switching off removes the task. Starting switching first replaces any previous monitor and confirms that Task Scheduler reports it running. A private Windows job object stops the monitor’s temporary usage readers if its task is terminated. Your organization may restrict task registration; Switchboard reports that failure instead of silently claiming monitoring is active.
 
 The folder picker and private-folder access controls use the built-in Windows PowerShell. The dashboard, profiles, and Claude must run under the same user. Keep native Windows and WSL installations separate: they have different active Claude logins and credential stores.
 
@@ -49,3 +49,5 @@ The folder picker and private-folder access controls use the built-in Windows Po
 Follow [testing.md](testing.md), including the two-terminal continuation test. A passed simulated test or a changed route marker alone does not verify that an already-open Claude chat adopted the new account.
 
 All platforms keep account names, per-account session thresholds, manual switching, and the user-controlled limit fallback. Weekly usage is still not used for switching.
+
+Windows CI checks actual execution of a disposable Task Scheduler task and confirms that forced monitor exit also terminates its child process. These probes never use Claude accounts.

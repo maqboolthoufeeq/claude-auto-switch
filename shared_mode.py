@@ -26,7 +26,7 @@ from rotator import (
     claude_binary, load_config, usage_percent,
 )
 from session_usage import read_session_usage
-from platform_runtime import file_lock, private_directory
+from platform_runtime import file_lock, private_directory, windows_monitor_job
 import secure_store
 import background_monitor
 
@@ -822,6 +822,7 @@ def main() -> int:
     elif args.action == "hook":
         hook(config, config_path)
     elif args.action == "watch":
+        windows_monitor_job()
         watch(config, config_path)
     return 0
 
