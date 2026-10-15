@@ -1,0 +1,52 @@
+{
+  "name": "cswitch",
+  "version": "0.1.0",
+  "description": "Switch between Claude Code accounts automatically: a local dashboard and background monitor that rotates the shared Claude login at a session-usage threshold or reported rate limit.",
+  "bin": {
+    "cswitch": "bin/cswitch.js"
+  },
+  "files": [
+    "bin/",
+    "ui/",
+    "docs/",
+    "*.py",
+    "pyproject.toml",
+    "uv.lock",
+    "keychain_writer.swift",
+    "rotator.example.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "uv run --group tests python -B -m unittest discover -s tests -v && node --check ui/app.js && node --check bin/cswitch.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "accounts",
+    "account-switcher",
+    "usage-limit",
+    "rate-limit",
+    "rotation",
+    "cli",
+    "dashboard"
+  ],
+  "author": "Maqbool Thoufeeq",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maqboolthoufeeq/claude-auto-switch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maqboolthoufeeq/claude-auto-switch/issues"
+  },
+  "homepage": "https://github.com/maqboolthoufeeq/claude-auto-switch#readme"
+}

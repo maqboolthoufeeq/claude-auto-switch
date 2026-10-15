@@ -8,7 +8,7 @@ Set a threshold such as **95%**, keep usage-limit switching as a fallback, and m
 
 ## Before you start
 
-You need [Claude Code](https://code.claude.com/docs/en/setup) 2.1.259 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and at least two Claude accounts you control. uv manages Python for you.
+You need [Claude Code](https://code.claude.com/docs/en/setup) 2.1.259 or newer and at least two Claude accounts you control. Install Switchboard from npm (Node.js 18+ with [uv](https://docs.astral.sh/uv/getting-started/installation/) or Python 3.9+), or from a Git checkout with uv. uv manages Python for you.
 
 | Platform | What you need for automatic switching |
 | --- | --- |
@@ -22,7 +22,16 @@ Linux and Windows remain **preview** ports: native components are tested, but li
 
 ### 1. Download and open Switchboard
 
-Install the requirements above, then run these commands in Terminal or PowerShell:
+Install with npm, then start it:
+
+```sh
+npm install -g cswitch
+cswitch
+```
+
+`cswitch` keeps its configuration, profiles, and state in `~/.cswitch`; set `CSWITCH_HOME` to use another folder. The first run prepares a private Python environment there. `cswitch help` lists the terminal commands.
+
+Or run it from a Git checkout in Terminal or PowerShell:
 
 ```sh
 git clone https://github.com/maqboolthoufeeq/claude-auto-switch.git
@@ -35,7 +44,7 @@ On native Windows, use `uv sync --python 3.14` for the install step. See the [Wi
 
 Use the browser tab opened by the launcher at **http://127.0.0.1:56729/**. The launcher creates the first configuration automatically and reopens an existing dashboard.
 
-Next time, use **Open Switchboard.command** on macOS, **Open Switchboard.cmd** on Windows, or `./Open\ Switchboard.sh` on Linux.
+Next time, run `cswitch`. In a Git checkout, use **Open Switchboard.command** on macOS, **Open Switchboard.cmd** on Windows, or `./Open\ Switchboard.sh` on Linux.
 
 ### 2. Connect your accounts
 
@@ -43,7 +52,7 @@ In **Your accounts**, click **Sign in** and complete Claude's browser login for 
 
 Open **Name and settings** to give each account a name you recognize and choose its switching percentage. Use **Add an account** if you need more profiles.
 
-Profiles are created automatically in `profile/`. No passwords or `.env` file are needed.
+Profiles are created automatically in `profile/` inside Switchboard's data folder: `~/.cswitch` for npm installs, the project folder for a Git checkout. No passwords or `.env` file are needed.
 
 ### 3. Turn on automatic switching
 
@@ -56,6 +65,15 @@ Profiles are created automatically in `profile/`. No passwords or `.env` file ar
 The monitor checks usage about every 30 seconds and switches when a check observes the saved threshold. It keeps running after you close the dashboard. Switchboard changes the shared login without restarting your terminals; retry an interrupted message after switching. Before relying on existing chats continuing under the new account, complete the [two-terminal check](docs/testing.md#2-test-two-open-claude-chats).
 
 Already installed? Follow the [upgrade steps](docs/advanced.md#update-an-existing-installation) to update the code and background monitor.
+
+### Long runs, workflows, and many agents
+
+Switching is designed not to interrupt work that is already running:
+
+- The usage check asks its short-lived Claude session to quit normally and waits for any login refresh to finish. A check never signs your other sessions out, and restarting the monitor waits for a running check.
+- A switch runs in its own background process. A Claude session that exits right after a limit error cannot cut the switch short.
+- Limit reports that arrive within 90 seconds of a switch come from chats or agents still holding the previous login. They do not mark the new account as limited.
+- An agent that already failed at a limit has to be retried; new chats and agents use the new login. For heavy parallel work, a threshold around 90% leaves room for the usage spent between checks.
 
 ## Everyday use
 
@@ -76,7 +94,7 @@ Turn off automatic switching, then open **Run a guided task**. Choose your proje
 ## Privacy and limits
 
 - Saved switching credentials live in **macOS Keychain**, **Linux Secret Service**, or **Windows Credential Manager**. Switchboard never falls back to plaintext for its saved switching copies. Claude manages its own active credential files on Linux and Windows.
-- Profiles, configuration, private dashboard links, and logs are excluded from Git. Sign in separately on each computer; do not copy or publish profile folders.
+- Profiles, configuration, private dashboard links, and logs stay in the data folder. They are excluded from Git and never part of the npm package. Sign in separately on each computer; do not copy or publish profile folders.
 - The dashboard runs locally and requires its private launcher link. Opening `ui/index.html` directly does not connect it.
 - Terminal chats must use the default Claude login. Separate profiles, API keys, and fixed OAuth tokens do not follow shared switching.
 - Changes to Claude's `/usage` display can make percentage checks unavailable. Keep the limit fallback enabled if you want switching to continue at reported limits.
@@ -87,7 +105,8 @@ Turn off automatic switching, then open **Run a guided task**. Choose your proje
 | --- | --- |
 | **Config already exists** during setup | Skip `rotator.py init` and open the dashboard. |
 | **Needs sign-in** or an expired saved login | Turn switching off, sign in again, prepare accounts again, then turn switching on. |
-| **Session percentage unavailable** | Open `claude` once from the Switchboard project folder and complete any initial setup. Keep the limit fallback on. |
+| **Session percentage unavailable** | Open `claude` once from Switchboard's data folder (`~/.cswitch`, or the project folder for a Git checkout) and complete any initial setup. Keep the limit fallback on. |
+| Moving from a Git checkout to `cswitch` | Turn off switching in the old folder first, then sign in and prepare accounts in `cswitch`. To keep the old accounts instead, start it with `CSWITCH_HOME` set to the old folder. Only one background monitor runs per user: the install you turn on last takes over. |
 | **Update saved account access** | Click it once to move older saved credentials to the updated Keychain path. macOS may request access to the older items. |
 | An invalid private link or an old launcher message | Reopen Switchboard through its launcher. Close the older launcher first if it is still running. |
 | A Linux credential-store or monitor startup error | Use your normal desktop session, unlock its keyring, and check [Linux setup](docs/platform-support.md#ubuntu-and-linux-desktops). |

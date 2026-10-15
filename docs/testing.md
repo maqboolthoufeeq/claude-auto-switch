@@ -72,7 +72,7 @@ The automated tests also simulate a 96% reading against a 95% threshold and veri
 
 - Turn **Switch at a reported limit too** off and back on. Refresh the page after each change and confirm the setting was saved.
 - With fallback on, a real Claude rate-limit error should switch accounts when one is available. Retry the interrupted message after the switch.
-- Close the dashboard launcher while switching is on. Before reopening it, run `uv run shared_mode.py status` from the project folder twice, at least a minute apart. `session_usage.checked_at` should advance and its account should match the current login. Record any usage error. Then reopen Switchboard. Checking before reopening matters because the launcher can restart an enabled monitor.
+- Close the dashboard launcher while switching is on. Before reopening it, run `cswitch status` (or `uv run shared_mode.py status` from the project folder) twice, at least a minute apart. `session_usage.checked_at` should advance and its account should match the current login. Record any usage error. Then reopen Switchboard. Checking before reopening matters because the launcher can restart an enabled monitor.
 
 Automated tests simulate the rate-limit event and verify that disabling fallback prevents that event from switching accounts. No real quota needs to be exhausted for this check.
 
@@ -80,7 +80,7 @@ Automated tests simulate the rate-limit event and verify that disabling fallback
 
 1. Save your work and leave automatic switching on. Record the current account and usage reading.
 2. Sign out of the OS and sign back in as the same user. On Linux/macOS, unlock the credential store if asked.
-3. Before opening Switchboard, open a terminal in its project folder and run `uv run shared_mode.py status` twice, about a minute apart. Allow up to two minutes for the first usage check.
+3. Before opening Switchboard, run `cswitch status` (or `uv run shared_mode.py status` in its project folder) twice, about a minute apart. Allow up to two minutes for the first usage check.
 4. Confirm `session_usage.checked_at` advances without launching the dashboard and note any error.
 5. Open Switchboard and confirm its state matches. Repeat a short Claude message and the two-terminal check if needed.
 

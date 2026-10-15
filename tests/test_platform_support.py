@@ -54,21 +54,52 @@ class PlatformTests(unittest.TestCase):
              patch.object(rotator.shutil, "which", return_value="C:/Claude/custom.cmd"):
             with self.assertRaises(RotatorError):
                 rotator.claude_binary(config)
+    def test_windows_json_save_retries_while_a_reader_has_the_file_open(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "state.json"
+            path.write_text("{}\n", encoding="utf-8")
+            real_replace = os.replace
+            busy = [PermissionError(13, "Access is denied")]  # a dashboard poll is reading the file
+            def replace(source, target):
+                if busy:
+                    raise busy.pop()
+                real_replace(source, target)
+            with patch.object(rotator.sys, "platform", "win32"), \
+                 patch.object(rotator.os, "replace", side_effect=replace), \
+                 patch.object(rotator.time, "sleep"):
+                rotator.atomic_json(path, {"current": "account-2"})
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"current": "account-2"})
+
     def test_launcher_reopens_existing_private_dashboard(self):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)
             (directory / ".shared-rotator").mkdir()
             link = "http://127.0.0.1:56729/#token=test-only"
             (directory / ".shared-rotator" / "dashboard-url").write_text(link)
-            response = MagicMock()
-            response.__enter__.return_value.read.return_value = b"<title>Switchboard</title>"
-            with patch.object(launch, "BASE_DIR", directory), \
-                 patch.object(launch.urllib.request, "urlopen", return_value=response), \
-                 patch.object(launch.webbrowser, "open") as browser, \
+            with patch.object(launch, "DATA_DIR", directory), \
+                 patch.object(launch.urllib.request, "urlopen", return_value=MagicMock()) as probe, \
+                 patch.object(launch, "open_dashboard") as browser, \
                  patch.object(launch, "dashboard_main") as start:
                 self.assertEqual(launch.main(), 0)
                 browser.assert_called_once_with(link)
                 start.assert_not_called()
+            self.assertEqual(probe.call_args.args[0].get_header("X-rotator-token"), "test-only")
+
+    def test_launcher_starts_its_own_dashboard_when_the_saved_link_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            (directory / ".shared-rotator").mkdir()
+            (directory / ".shared-rotator" / "dashboard-url").write_text("http://127.0.0.1:56729/#token=stale")
+            (directory / "rotator.json").write_text("{}")
+            refused = launch.urllib.error.HTTPError("http://127.0.0.1:56729/api/task", 403, "Access denied", {}, None)
+            self.addCleanup(refused.close)
+            with patch.object(launch, "DATA_DIR", directory), \
+                 patch.object(launch.urllib.request, "urlopen", side_effect=refused), \
+                 patch.object(launch, "open_dashboard") as browser, \
+                 patch.object(launch, "dashboard_main", return_value=0) as start:
+                self.assertEqual(launch.main(), 0)
+            browser.assert_not_called()
+            start.assert_called_once_with()
 
     def test_launcher_creates_first_config_in_its_project_not_working_directory(self):
         with tempfile.TemporaryDirectory() as root:
@@ -79,7 +110,7 @@ class PlatformTests(unittest.TestCase):
             previous = Path.cwd()
             try:
                 os.chdir(elsewhere)
-                with patch.object(launch, "BASE_DIR", directory), \
+                with patch.object(launch, "DATA_DIR", directory), \
                      patch.object(launch, "dashboard_main", return_value=0), \
                      patch("sys.stdout", new=io.StringIO()):
                     self.assertEqual(launch.main(), 0)
@@ -261,8 +292,9 @@ class PlatformTests(unittest.TestCase):
              patch.object(session_usage.time, "sleep"), \
              patch.object(session_usage, "kill_windows_tree") as cleanup:
             result = session_usage.read_session_usage("claude.exe", {})
-        self.assertEqual(result, (6.0, None))
-        process.write.assert_called_once_with("/usage\r")
+        self.assertEqual(result, (6.0, None, None))
+        # /usage, then Esc and /exit: Claude is asked to quit before anything is killed.
+        self.assertEqual([c.args[0] for c in process.write.call_args_list], ["/usage\r", "\x1b", "/exit\r"])
         cleanup.assert_called_once_with(98765)
 
     @unittest.skipUnless(sys.platform == "win32", "Requires the native Windows credential store")

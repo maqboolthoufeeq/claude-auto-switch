@@ -19,7 +19,7 @@ def backend():
             from keyring.backends.SecretService import Keyring
             return Keyring()
     except ImportError as exc:
-        raise RotatorError("Secure account storage needs its dependencies. Run uv sync and reopen Switchboard.") from exc
+        raise RotatorError("Secure account storage needs its Python dependencies. Reopen Switchboard so it can install them (in a git checkout, run uv sync).") from exc
     raise RotatorError("This operating system has no supported secure credential store")
 
 

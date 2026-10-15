@@ -6,6 +6,7 @@ import hashlib
 import csv
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -39,8 +40,27 @@ def run_checked(argv: list[str], error: str) -> None:
         raise RotatorError(error)
 
 
+def retire_others(config_path: Path) -> None:
+    """One monitor per user: stop monitors registered for another config path (an older install or folder)."""
+    own = identity(config_path)
+    if sys.platform.startswith("linux"):
+        for unit in linux_unit_path(config_path).parent.glob("switchboard-*.service"):
+            if unit.stem != own:
+                subprocess.run(["systemctl", "--user", "disable", "--now", unit.name], capture_output=True, timeout=20, check=False)
+                unit.unlink(missing_ok=True)
+    elif sys.platform == "win32":
+        tasks = subprocess.run(["schtasks", "/Query", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                               errors="replace", timeout=20, check=False)
+        for row in csv.reader((tasks.stdout or "").splitlines()):
+            name = row[0].lstrip("\\") if row else ""
+            if re.fullmatch(r"switchboard-[0-9a-f]{12}", name) and name != own:
+                subprocess.run(["schtasks", "/End", "/TN", name], capture_output=True, timeout=20, check=False)
+                subprocess.run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True, timeout=20, check=False)
+
+
 def install(config_path: Path, state_dir: Path, script: Path) -> None:
     argv = [sys.executable, str(script), "--config", str(config_path), "watch"]
+    retire_others(config_path)
     if sys.platform.startswith("linux"):
         path = linux_unit_path(config_path)
         path.parent.mkdir(parents=True, exist_ok=True)

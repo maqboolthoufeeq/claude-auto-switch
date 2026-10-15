@@ -12,6 +12,7 @@ let sharedInfo = null;
 let sharedUnavailable = false;
 let noticeTimer = null;
 let accountRenderKey = "";
+let sharedChoicesKey = "";
 let selectedAccountInfo = null;
 let pendingAccountAction = null;
 const openSettings = new Set();
@@ -204,7 +205,7 @@ function makeAccountRow(account, index) {
 
 function renderAccounts() {
   const key = JSON.stringify([accountsLoaded, accounts, sharedInfo?.current, sharedInfo?.login_errors, sharedInfo?.accounts?.map((account) => [account.name, account.prepared])]);
-  if (key === accountRenderKey) return;
+  if (key === accountRenderKey || document.activeElement?.closest(".account-settings")) return;
   accountRenderKey = key;
   $("accounts").replaceChildren(...accounts.map(makeAccountRow));
   const ready = sharedInfo?.accounts?.filter((account) => account.prepared && !sharedInfo?.login_errors?.[account.name]).length || 0;
@@ -231,6 +232,7 @@ function renderAccountInfo(info) {
   $("account-dialog-status").className = "dialog-status" + (info.signed_in && !info.login_error ? "" : " out");
   const facts = [
     ["Profile ID", info.name],
+    ["Login check", info.status],
     ["Email (if known)", info.email || "Not available"],
     ["Organization ID", info.organization_id || "Not available"],
     ["Current shared login", info.current ? "Yes" : "No"],
@@ -370,11 +372,15 @@ function renderShared() {
   const usage = data?.session_usage;
   const recentUsage = usage?.account === data?.current && Date.now() / 1000 - Number(usage.checked_at || 0) < 180;
   const threshold = accounts.find((account) => account.name === data?.current)?.threshold_percent ?? 95;
+  const lastActivity = Math.max(Number(usage?.checked_at) || 0, Number(data?.enabled_at) || 0,
+    Number((data?.history || []).slice(-1)[0]?.at) || 0);
   $("shared-session-usage").textContent = !isEnabled ? "Session usage checks start when switching is on."
     : needsKeychainUpdate ? "Session checks resume after the Keychain update."
     : recentUsage && Number.isFinite(usage.percent) ? `Current session: ${usage.percent}% used · switch at ${threshold}%`
       : recentUsage && usage.error ? "Session percentage unavailable. " + (data?.fallback_on_limit !== false ? "Limit fallback is on." : "Limit fallback is off.")
-        : "Checking the current session percentage…";
+        : Date.now() / 1000 - lastActivity > 300
+          ? "The usage monitor is not responding (last check: " + formatDate(usage?.checked_at * 1000) + "). If this persists, turn switching off and on."
+          : "Checking the current session percentage…";
   $("shared-usage-note").textContent = isEnabled && recentUsage && usage.error
     ? usage.error
     : "Only current session usage is checked. Weekly usage is not used for switching.";
@@ -402,9 +408,12 @@ function renderShared() {
           : "Turn it on, then start new Claude chats so they load the limit detector.";
   const operation = $("shared-operation");
   const operationDetails = $("shared-operation-details");
-  const sharedRun = taskInfo?.kind?.startsWith("shared-");
+  const loginName = taskInfo?.kind?.startsWith("login:") ? taskInfo.kind.slice(6) : "";
+  const sharedRun = taskInfo?.kind?.startsWith("shared-") || Boolean(loginName);
   const actionName = sharedRun ? taskInfo.kind.slice(7) : "";
-  const actionLabel = { setup: "Preparing accounts", enable: "Turning on switching", disable: "Turning off switching", switch: "Switching account", migrate: "Updating saved account access" }[actionName] || "Updating switching";
+  const actionLabel = loginName
+    ? "Waiting for you to finish signing in to " + (accounts.find((account) => account.name === loginName)?.display_name || loginName) + " in your browser"
+    : { setup: "Preparing accounts", enable: "Turning on switching", disable: "Turning off switching", switch: "Switching account", migrate: "Updating saved account access" }[actionName] || "Updating switching";
   const operationBusy = sharedRun && taskInfo?.busy;
   const operationFailed = sharedRun && taskInfo?.exit_code !== null && taskInfo?.exit_code !== undefined && taskInfo.exit_code !== 0;
   operation.hidden = !operationBusy && !operationFailed;
@@ -412,14 +421,19 @@ function renderShared() {
   operation.textContent = operationBusy ? actionLabel + "…" : operationFailed ? "That change did not finish. See the details below and try again." : "";
   operationDetails.hidden = !operationFailed;
   if (operationFailed) $("shared-operation-log").textContent = (taskInfo?.messages || []).join("\n");
+  $("shared-cancel").hidden = !(loginName && operationBusy);
   const select = $("shared-account");
   const selected = select.value;
   const choices = (data?.accounts || []).filter((account) => account.prepared !== false);
-  select.replaceChildren(...choices.map((account) => {
-    const option = node("option", "", account.display_name);
-    option.value = account.name;
-    return option;
-  }));
+  const choicesKey = JSON.stringify(choices.map((account) => [account.name, account.display_name]));
+  if (choicesKey !== sharedChoicesKey) {
+    select.replaceChildren(...choices.map((account) => {
+      const option = node("option", "", account.display_name);
+      option.value = account.name;
+      return option;
+    }));
+    sharedChoicesKey = choicesKey;
+  }
   if (choices.some((account) => account.name === selected)) select.value = selected;
   else if (data?.current && choices.some((account) => account.name === data.current)) select.value = data.current;
   $("shared-switch").disabled = unavailable || !prepared || needsKeychainUpdate || !choices.length || Boolean(taskInfo?.busy);
@@ -568,6 +582,12 @@ $("shared-migrate").addEventListener("click", () => sharedAction("migrate"));
 $("shared-enable").addEventListener("click", () => sharedAction("enable"));
 $("shared-disable").addEventListener("click", () => sharedAction("disable"));
 $("shared-switch").addEventListener("click", () => sharedAction("switch", $("shared-account").value));
+$("shared-cancel").addEventListener("click", async () => {
+  try {
+    await api("/api/stop", {});
+    await refreshTask();
+  } catch (error) { notice(friendlyError(error), "error"); }
+});
 $("fallback-toggle").addEventListener("change", async () => {
   const toggle = $("fallback-toggle");
   toggle.disabled = true;
@@ -611,10 +631,10 @@ else {
   refreshAll();
   setInterval(async () => {
     const results = await Promise.allSettled([refreshTask(), refreshShared()]);
-    if (results.every((result) => result.status === "fulfilled")) {
-      $("connection").classList.remove("offline");
-      $("connection").textContent = "Connected locally";
-    }
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed && !$("connection").classList.contains("offline")) notice(friendlyError(failed.reason), "error");
+    $("connection").classList.toggle("offline", Boolean(failed));
+    $("connection").textContent = failed ? "Disconnected" : "Connected locally";
   }, 2500);
   setInterval(() => {
     if (!document.activeElement?.closest(".account-settings")) refreshAccounts().catch(() => {});

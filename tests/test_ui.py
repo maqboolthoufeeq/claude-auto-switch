@@ -1,3 +1,4 @@
+import io
 import json
 import stat
 import sys
@@ -9,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import rotator_ui
+import shared_mode
 from rotator_ui import Dashboard
 from test_helpers import write_executable
 
@@ -32,6 +34,33 @@ class AuthorizationTests(unittest.TestCase):
         handler.headers = {"Host": "127.0.0.1:56729", "Origin": "http://127.0.0.1:56729",
                            "X-Rotator-Token": "test-only-token"}
         self.assertTrue(handler._authorized())
+
+    def handler(self, dashboard, method, path, headers=None, body=b""):
+        handler_type = rotator_ui.make_handler(dashboard, "test-only-token")
+        handler = handler_type.__new__(handler_type)
+        handler.server = SimpleNamespace(server_port=56729)
+        handler.headers = {"Host": "127.0.0.1:56729", "X-Rotator-Token": "test-only-token", **(headers or {})}
+        handler.path = path
+        handler.rfile = io.BytesIO(body)
+        handler._send_json = Mock()
+        getattr(handler, method)()
+        return handler._send_json.call_args.args
+
+    def test_api_errors_come_back_as_json_instead_of_dropped_connections(self):
+        dashboard = Mock()
+        dashboard.accounts.side_effect = rotator_ui.RotatorError("Claude Code command not found: claude")
+        dashboard.shared_status.side_effect = PermissionError("cannot write activity")
+        dashboard.task_status.side_effect = RuntimeError("Could not determine home directory.")
+        for path, message in (("/api/accounts", "Claude Code command not found: claude"),
+                              ("/api/shared", "cannot write activity"),
+                              ("/api/task?project=~nobody/app", "Could not determine home directory.")):
+            self.assertEqual(self.handler(dashboard, "do_GET", path), ({"error": message}, 400))
+        dashboard.set_threshold.side_effect = TypeError("float() argument must be a number")
+        for headers, body in (({"Content-Length": "abc"}, b""),
+                              ({"Content-Length": "16"}, b'{"percent":null}')):
+            value, status = self.handler(dashboard, "do_POST", "/api/threshold", headers, body)
+            self.assertEqual(status, 400)
+            self.assertIn("error", value)
 
 
 FAKE_CLAUDE = '''#!/usr/bin/env python3
@@ -75,12 +104,39 @@ class DashboardTests(unittest.TestCase):
         self.addCleanup(self.dashboard.shutdown)
 
     def wait_for_exit(self):
-        for _ in range(100):
+        deadline = time.monotonic() + 30  # three interpreter start-ups; slow CI machines need the headroom
+        while time.monotonic() < deadline:
             status = self.dashboard.task_status(str(self.project))
             if not status["busy"] and status["exit_code"] is not None:
                 return status
-            time.sleep(0.02)
+            time.sleep(0.05)
         self.fail("Dashboard process did not exit")
+
+    def test_add_account_rejects_profile_folder_already_in_use(self):
+        data = json.loads(self.config.read_text())
+        data["accounts"][0]["name"] = "work"
+        self.config.write_text(json.dumps(data))
+        with self.assertRaisesRegex(rotator_ui.RotatorError, "own config_dir"):
+            self.dashboard.add_account("account-1", "", "")
+        self.assertEqual([item["name"] for item in self.dashboard.accounts()], ["work"])
+
+    def test_status_pass_that_overlaps_an_account_change_is_recomputed(self):
+        real = rotator_ui.auth_status
+        added = []
+        def status_then_add(binary, account):
+            if not added:
+                added.append(True)
+                self.dashboard.add_account("account-2", "", "")
+            return real(binary, account)
+        with patch.object(rotator_ui, "auth_status", side_effect=status_then_add), \
+             patch.object(shared_mode, "STATE_FILE", self.root / "missing-state.json"):
+            self.assertEqual([item["name"] for item in self.dashboard.accounts()], ["account-1", "account-2"])
+            self.assertEqual(self.dashboard.account_info("account-2")["name"], "account-2")
+
+    def test_shutdown_lets_shared_login_change_finish(self):
+        self.dashboard._start([sys.executable, "-c", "import time; time.sleep(0.5)"], "shared-switch")
+        self.dashboard.shutdown()
+        self.assertEqual(self.dashboard.process.wait(), 0)
 
     def test_dashboard_link_is_private_and_updates_on_restart(self):
         path = rotator_ui.save_dashboard_url(self.config, "http://127.0.0.1:56729/#token=first")
@@ -119,7 +175,7 @@ class DashboardTests(unittest.TestCase):
         state_file.write_text(json.dumps({"enabled": True, "current": "account-1",
                                           "identities": {"account-1": "one@example.com|org"},
                                           "history": [], "last_error": None}))
-        with patch.object(rotator_ui, "STATE_FILE", state_file):
+        with patch.object(shared_mode, "STATE_FILE", state_file):
             status = self.dashboard.shared_status()
         self.assertTrue(status["enabled"])
         self.assertEqual(status["imported_count"], 1)
@@ -140,7 +196,7 @@ class DashboardTests(unittest.TestCase):
                                                          "account-3": "three@example.com|org3"},
                                           "limited": {}, "history": [{"from": "account-3", "to": "account-1", "reason": "6% usage", "at": time.time()}],
                                           "login_errors": {"account-3": "Saved login rejected"}, "last_error": None}))
-        with patch.object(rotator_ui, "STATE_FILE", state_file), \
+        with patch.object(shared_mode, "STATE_FILE", state_file), \
              patch.object(rotator_ui, "shared_lock"), \
              patch.object(rotator_ui, "vault_delete") as delete_vault:
             info = self.dashboard.account_info("account-3")
@@ -163,7 +219,7 @@ class DashboardTests(unittest.TestCase):
         profile = self.root / "profile" / "account-2"
         profile.mkdir(parents=True)
         (profile / "notes.txt").write_text("keep local history")
-        with patch.object(rotator_ui, "STATE_FILE", self.root / "missing-state.json"), \
+        with patch.object(shared_mode, "STATE_FILE", self.root / "missing-state.json"), \
              patch.object(rotator_ui, "shared_lock"):
             self.dashboard.remove_account("account-2", delete=True)
         self.assertEqual([item["name"] for item in self.dashboard.accounts()], ["account-1"])
@@ -173,7 +229,7 @@ class DashboardTests(unittest.TestCase):
         state_file = self.root / "shared-state.json"
         state_file.write_text(json.dumps({"enabled": True, "current": "account-1",
                                           "identities": {"account-1": "one@example.com|org"}}))
-        with patch.object(rotator_ui, "STATE_FILE", state_file), \
+        with patch.object(shared_mode, "STATE_FILE", state_file), \
              patch.object(rotator_ui, "shared_lock"):
             with self.assertRaisesRegex(rotator_ui.RotatorError, "Switch the shared login"):
                 self.dashboard.remove_account("account-1")

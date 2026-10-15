@@ -28,7 +28,7 @@
         <div class="compatibility-icon" aria-hidden="true">!</div>
         <div>
           <strong>Switchboard needs to be reopened</strong>
-          <p>This browser tab is connected to an older launcher. Close the Switchboard Terminal window, then open <b>Open Switchboard.command</b> again. Your account sign-ins are saved.</p>
+          <p>This browser tab is connected to an older launcher. Close the Switchboard terminal window, then start Switchboard again. Your account sign-ins are saved.</p>
         </div>
       </div>
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
@@ -76,6 +76,7 @@
               <p id="shared-action-help" class="action-help"></p>
               <label class="fallback-choice"><input id="fallback-toggle" type="checkbox" checked><span><strong>Switch at a reported limit too</strong><small>Keep this on as a fallback if the session percentage is unavailable or changes between checks.</small></span></label>
               <div id="shared-operation" class="operation" role="status" hidden></div>
+              <button id="shared-cancel" class="text-button" type="button" hidden>Cancel sign-in</button>
               <details id="shared-operation-details" class="details-note" hidden><summary>See operation details</summary><pre id="shared-operation-log"></pre></details>
             </section>
 
@@ -84,7 +85,7 @@
               <ol class="steps">
                 <li><span class="step-number">1</span><div><strong>Keep using Claude in your terminals</strong><p>Open local chats normally with the shared Claude login.</p></div></li>
                 <li><span class="step-number">2</span><div><strong>Switch at your session threshold</strong><p>Switchboard checks the current session percentage and uses each account’s saved threshold.</p></div></li>
-                <li><span class="step-number">3</span><div><strong>Continue the same chat</strong><p>The chat stays open. Retry the interrupted message after the account changes.</p></div></li>
+                <li><span class="step-number">3</span><div><strong>Retry after the switch</strong><p>New chats use the new login. Retry an interrupted message after the account changes. Before relying on chats that were already open, complete the two-terminal check in the testing guide.</p></div></li>
               </ol>
               <p id="shared-usage-note" class="small-note"></p>
             </section>

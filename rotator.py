@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Continue one Claude Code task across separately authenticated Team profiles."""
+"""Continue one Claude Code task across separately signed-in Claude subscription profiles."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from platform_runtime import RotatorError, file_lock, interrupt_process, process
 
 
 BASE_DIR = Path(__file__).resolve().parent
+# User data (config, profiles, state). The npm launcher sets CSWITCH_HOME; a git checkout keeps data beside the code.
+DATA_DIR = Path(os.environ.get("CSWITCH_HOME") or BASE_DIR).expanduser().resolve()
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -33,7 +35,7 @@ SCHEMA = {
 }
 LIMIT_PATTERN = re.compile(
     r"(?:usage limit|out of usage|usage exhausted|"
-    r"you(?:'|’)ve (?:reached|hit) (?:your|the) (?:usage|session|weekly) limit|"
+    r"you(?:'|’)ve (?:reached|hit) (?:your|the) |"
     r"5-hour limit reached|session limit reached|weekly limit reached|"
     r"limit reached.{0,100}resets?)",
     re.IGNORECASE,
@@ -85,16 +87,26 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, path)
+        for attempt in range(50):
+            try:
+                os.replace(temp, path)
+                break
+            except PermissionError:
+                # Windows refuses to replace a file another process has open for reading for a moment.
+                if sys.platform != "win32" or attempt == 49:
+                    raise
+                time.sleep(0.02)
     finally:
         temp.unlink(missing_ok=True)
 
 
-def load_config(path: Path) -> Config:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RotatorError(f"Cannot read config {path}: {exc}") from exc
+def load_config(path: Path, data: Any = None) -> Config:
+    """Read and validate a config; pass `data` to validate edits before they are saved to `path`."""
+    if data is None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RotatorError(f"Cannot read config {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise RotatorError("Config must be a JSON object")
     command = data.get("claude_command", "claude")
@@ -197,7 +209,7 @@ def auth_status(binary: str, account: Account) -> tuple[bool, str]:
     if proc.returncode != 0 or not data.get("loggedIn"):
         return False, "not signed in"
     if method != "claude.ai":
-        return False, f"using {method}, not a Team subscription login"
+        return False, f"using {method}, not a Claude subscription login"
     return True, "signed in"
 
 
@@ -270,15 +282,21 @@ def run_claude(binary: str, config: Config, account: Account, project: Path,
     private_directory(log_dir)
     stdout_path = log_dir / "stdout.json"
     stderr_path = log_dir / "stderr.txt"
-    argv = [binary, "-p", prompt, "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
+    prompt_path = log_dir / "prompt.txt"
+    fd = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(prompt)
+    # The prompt goes in on stdin: argv is visible to every local user in the process list.
+    argv = [binary, "-p", "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
             "--permission-mode", config.permission_mode, "--permission-prompts", "none"]
     if session_id:
         argv.extend(["--resume", session_id])
     env = profile_env(account)
-    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr, \
+            prompt_path.open("rb") as stdin:
         os.chmod(stdout_path, 0o600)
         os.chmod(stderr_path, 0o600)
-        proc = subprocess.Popen(argv, cwd=project, env=env, stdin=subprocess.DEVNULL,
+        proc = subprocess.Popen(argv, cwd=project, env=env, stdin=stdin,
                                 stdout=stdout, stderr=stderr, **process_options())
         try:
             while True:
@@ -310,6 +328,8 @@ def is_usage_limit(code: int, result: dict[str, Any] | None, output: str) -> boo
         return False
     message = output
     if isinstance(result, dict):
+        if result.get("api_error") == "usage_limit_reached":
+            return True
         message += "\n" + str(result.get("result", ""))
     return bool(LIMIT_PATTERN.search(message))
 
@@ -370,7 +390,12 @@ def execute_task(config: Config, project: Path, task: str | None) -> int:
     state_path, handoff, logs = state_paths(project)
     if task is not None:
         if state_path.exists():
-            previous = json.loads(state_path.read_text(encoding="utf-8"))
+            try:
+                previous = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise RotatorError(f"No readable task state at {state_path}: {exc}") from exc
+            if not isinstance(previous, dict):
+                raise RotatorError(f"Invalid task state at {state_path}")
             if previous.get("status") != "complete":
                 raise RotatorError(f"A task is already saved in {state_path}; use resume")
         state = {"task_id": uuid.uuid4().hex[:12], "task": task, "status": "running", "next_account_index": 0,
@@ -383,7 +408,7 @@ def execute_task(config: Config, project: Path, task: str | None) -> int:
     else:
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             raise RotatorError(f"No readable task state at {state_path}: {exc}") from exc
         if not isinstance(state, dict) or not isinstance(state.get("task"), str) or not isinstance(state.get("runs"), list):
             raise RotatorError(f"Invalid task state at {state_path}")
@@ -482,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
         import signal
         signal.signal(signal.SIGBREAK, signal.default_int_handler)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("rotator.json"))
+    parser.add_argument("--config", type=Path, default=DATA_DIR / "rotator.json")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create an editable five-account config")
     login_parser = sub.add_parser("login", help="Open Claude's browser login for one account")
@@ -490,10 +515,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="Check each account's Claude login")
     run_parser = sub.add_parser("run", help="Start a new task")
     run_parser.add_argument("--project", type=Path, required=True)
-    run_parser.add_argument("task", help="The task to complete")
+    run_parser.add_argument("task", help="The task to complete, or - to read it from standard input")
     resume_parser = sub.add_parser("resume", help="Continue the saved task")
     resume_parser.add_argument("--project", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "run" and args.task == "-":
+        args.task = sys.stdin.read()
     config_path = args.config.expanduser().resolve()
     if args.command == "init":
         if config_path.exists():

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from test_helpers import write_executable
+from rotator import is_usage_limit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,19 +19,24 @@ from pathlib import Path
 account = Path(os.environ["CLAUDE_CONFIG_DIR"]).name
 trace = Path(os.environ["FAKE_TRACE_DIR"])
 trace.mkdir(exist_ok=True)
+mode = os.environ.get("FAKE_MODE", "limit")
 if sys.argv[1:3] == ["auth", "status"]:
-    print(json.dumps({"loggedIn": True, "authMethod": "claude.ai"}))
+    method = "apiKey" if mode == "apikey" and account == "account-1" else "claude.ai"
+    print(json.dumps({"loggedIn": True, "authMethod": method}))
     sys.exit(0)
 if sys.argv[1:3] == ["auth", "login"]:
     (trace / "login.json").write_text(json.dumps({"account": account, "argv": sys.argv[1:]}))
     sys.exit(0)
 if "-p" not in sys.argv:
     sys.exit(4)
+prompt = sys.stdin.read()
 with (trace / "calls.jsonl").open("a") as handle:
-    handle.write(json.dumps({"account": account, "argv": sys.argv[1:]}) + "\n")
-mode = os.environ.get("FAKE_MODE", "limit")
+    handle.write(json.dumps({"account": account, "argv": sys.argv[1:], "prompt": prompt}) + "\n")
 if mode == "limit" and account == "account-1":
     print(json.dumps({"is_error": True, "result": "You've hit your session limit · resets at 3pm"}))
+    sys.exit(1)
+if mode == "relogin" and account == "account-1":
+    print(json.dumps({"is_error": True, "result": "OAuth token revoked · Please run /login"}))
     sys.exit(1)
 if mode == "error":
     print(json.dumps({"is_error": True, "result": "Network unavailable"}))
@@ -78,13 +84,13 @@ class RotatorIntegrationTests(unittest.TestCase):
                                            "permission_mode": "auto", "max_runs": 5,
                                            "accounts": self.accounts}))
 
-    def call(self, *args, mode="limit"):
+    def call(self, *args, mode="limit", stdin=None):
         env = os.environ.copy()
         env["FAKE_TRACE_DIR"] = str(self.trace)
         env["FAKE_MODE"] = mode
         return subprocess.run([sys.executable, "-B", str(ROOT / "rotator.py"),
                                "--config", str(self.config), *args],
-                              env=env, capture_output=True, text=True)
+                              env=env, capture_output=True, text=True, input=stdin)
 
     def calls(self):
         return [json.loads(line) for line in (self.trace / "calls.jsonl").read_text().splitlines()]
@@ -121,6 +127,39 @@ class RotatorIntegrationTests(unittest.TestCase):
         self.assertEqual([call["account"] for call in self.calls()], ["account-1"])
         self.assertEqual(self.state()["status"], "paused")
 
+    def test_api_key_profile_is_skipped(self):
+        result = self.call("run", "--project", str(self.project), "Build a feature", mode="apikey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call["account"] for call in self.calls()], ["account-2"])
+        self.assertIn("not a Claude subscription login", result.stdout)
+
+    def test_expired_login_rotates(self):
+        result = self.call("run", "--project", str(self.project), "Build a feature", mode="relogin")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call["account"] for call in self.calls()], ["account-1", "account-2"])
+        self.assertEqual(self.state()["runs"][0]["outcome"], "auth_error")
+
+    def test_task_text_stays_out_of_process_arguments(self):
+        # Every local user can read other processes' arguments; the task may contain private details.
+        result = self.call("run", "--project", str(self.project), "-", mode="ok", stdin="Rotate key s3cr3t-value")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        call = self.calls()[0]
+        self.assertIn("s3cr3t-value", call["prompt"])
+        self.assertNotIn("s3cr3t-value", " ".join(call["argv"]))
+        self.assertEqual(self.state()["task"], "Rotate key s3cr3t-value")
+
+    def test_corrupt_saved_state_is_an_error_not_a_traceback(self):
+        state = self.project / ".claude-rotator" / "state.json"
+        state.parent.mkdir()
+        for content in (b"null", b"[]", b"{bad", b"\xff\xfe{\x00}\x00"):
+            state.write_bytes(content)
+            for args in (["run", "--project", str(self.project), "Build a feature"],
+                         ["resume", "--project", str(self.project)]):
+                result = self.call(*args)
+                self.assertEqual(result.returncode, 1)
+                self.assertRegex(result.stderr, r"^Error: ", (content, args[0]))
+                self.assertEqual(state.read_bytes(), content)
+
     def test_profiles_inside_project_resolve_from_config_and_are_ignored(self):
         self.config = self.project / "rotator.json"
         for account in self.accounts:
@@ -143,6 +182,23 @@ class RotatorIntegrationTests(unittest.TestCase):
         ignore = (self.project / ".gitignore").read_text()
         self.assertIn("/profile/account-1/", ignore)
         self.assertIn("/profile/account-2/", ignore)
+
+
+
+class UsageLimitDetectionTests(unittest.TestCase):
+    def test_every_claude_limit_message_counts_as_a_limit(self):
+        for message in ("You've hit your session limit · resets 3pm",
+                        "You've hit your weekly limit · resets Oct 15, 3pm",
+                        "You've hit your Opus limit · resets Oct 15, 3pm · progress saved",
+                        "You've hit your Fable limit · resets Oct 15, 3pm",
+                        "You've hit your limit · resets 3pm",
+                        "You've reached your Fable limit. Switch to another model to continue.",
+                        "You're out of usage credits"):
+            with self.subTest(message=message):
+                self.assertTrue(is_usage_limit(1, {"is_error": True, "result": message}, ""))
+        self.assertTrue(is_usage_limit(1, {"is_error": True, "api_error": "usage_limit_reached"}, ""))
+        self.assertFalse(is_usage_limit(1, {"is_error": True, "result": "Network unavailable"}, ""))
+        self.assertFalse(is_usage_limit(0, {"is_error": False, "result": "You've hit your limit"}, ""))
 
 
 if __name__ == "__main__":

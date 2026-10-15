@@ -31,7 +31,7 @@ All platforms need Claude Code, [uv](https://docs.astral.sh/uv/getting-started/i
 
 1. Use macOS 13 or newer. Intel and Apple Silicon are targets; uv selects the Python architecture for your machine.
 2. Install the requirements above and follow the [README quick start](../README.md#1-download-and-open-switchboard).
-3. Next time, open **Open Switchboard.command**.
+3. Next time, run `cswitch`, or open **Open Switchboard.command** in a Git checkout.
 4. Allow macOS Keychain access if requested. A locked Keychain or reset permissions may prompt again; Switchboard cannot guarantee lifetime permission without further OS prompts.
 
 New installations do not need the Swift helper. It is retained only for recovering older Switchboard Keychain entries; see [migration](advanced.md#shared-login-controls).
@@ -48,7 +48,7 @@ The launcher checks the OS version before starting the dashboard or resolving Cl
    ```
 
 3. Unlock the desktop keyring. Switchboard does not store its password. Another compatible Secret Service provider can replace GNOME Keyring; a plaintext backend cannot.
-4. Follow the [README quick start](../README.md#1-download-and-open-switchboard). Next time, run `./Open\ Switchboard.sh` from the project folder.
+4. Follow the [README quick start](../README.md#1-download-and-open-switchboard). Next time, run `cswitch`, or `./Open\ Switchboard.sh` from the project folder of a Git checkout.
 5. Prepare your accounts and turn on switching through the dashboard.
 
 Zenity or KDialog supplies the optional folder picker. You can type the project path if neither is installed. Installing system packages may require administrator permission; running Switchboard and its monitor uses your ordinary user account.
@@ -68,7 +68,7 @@ Headless servers, non-systemd Linux, and WSL are not verified setups. Do not dis
    uv run launch.py
    ```
 
-4. Connect and prepare accounts in the dashboard. Next time, open **Open Switchboard.cmd**.
+4. Connect and prepare accounts in the dashboard. Next time, run `cswitch`, or open **Open Switchboard.cmd** in a Git checkout.
 
 The current terminal dependency provides x64 and ARM64 wheels with Python 3.10+. Python 3.9 uses the older x64 terminal dependency. ARM64 hardware has not been tested.
 

@@ -36,6 +36,12 @@ jobs:
           SWITCHBOARD_TEST_LAUNCHD: '1'
       - name: Check dashboard JavaScript
         run: node --check ui/app.js
+      - name: Check the npm package and its launcher
+        run: |
+          node --check bin/cswitch.js
+          npm pack --dry-run
+          node bin/cswitch.js init
+          node -e "require('fs').accessSync(require('path').join(require('os').homedir(), '.cswitch', 'rotator.json'))"
 
   linux-service:
     runs-on: ubuntu-22.04

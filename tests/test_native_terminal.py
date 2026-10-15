@@ -54,7 +54,7 @@ class NativeTerminalTests(unittest.TestCase):
             else:
                 binary = write_executable(path, PROGRAM)
                 result = read_session_usage(str(binary), dict(os.environ), timeout=15)
-            self.assertEqual(result, (6.0, None))
+            self.assertEqual(result, (6.0, None, None))
 
 
 if __name__ == "__main__":

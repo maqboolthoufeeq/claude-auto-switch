@@ -23,6 +23,7 @@ import webbrowser
 
 from rotator import (
     BASE_DIR,
+    DATA_DIR,
     RotatorError,
     atomic_json,
     auth_status,
@@ -31,7 +32,8 @@ from rotator import (
     profile_env,
     state_paths,
 )
-from shared_mode import STATE_FILE, old_vault_service, previous_vault_service, shared_env, shared_lock, state_read, state_save, vault_delete, vault_service
+import shared_mode
+from shared_mode import old_vault_service, previous_vault_service, shared_env, shared_lock, state_read, state_save, vault_delete, vault_service
 from platform_runtime import choose_folder, interrupt_process, process_options, private_directory
 
 
@@ -59,6 +61,19 @@ def save_dashboard_url(config_path: Path, url: str) -> Path:
     return path
 
 
+def open_dashboard(url: str) -> None:
+    """Open the dashboard without putting its token on a browser command line other local users can read."""
+    if sys.platform in ("darwin", "win32"):
+        webbrowser.open(url)  # macOS passes the URL to osascript on stdin; Windows hides other users' command lines
+        return
+    page = shared_mode.STATE_DIR / "open-dashboard.html"
+    private_directory(page.parent)
+    fd = os.open(page, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(f'<!doctype html><meta charset="utf-8"><script>location.replace({json.dumps(url)})</script>\n')
+    webbrowser.open(page.as_uri())
+
+
 class Dashboard:
     def __init__(self, config_path: Path):
         self.config_path = config_path
@@ -69,12 +84,18 @@ class Dashboard:
         self.last_exit_code: int | None = None
         self.messages: deque[str] = deque(maxlen=100)
         self.status_cache: tuple[float, list[dict[str, object]]] | None = None
+        self.status_generation = 0
         self.account_operation = False
         self.activity_lock = threading.Lock()
         self.activity_file = config_path.parent / ".shared-rotator" / "account-activity.json"
 
     def _config(self):
         return load_config(self.config_path)
+
+    def _invalidate_status(self) -> None:
+        """Call with self.lock held whenever accounts or their sign-ins change."""
+        self.status_cache = None
+        self.status_generation += 1
 
     @staticmethod
     def _timestamp() -> str:
@@ -142,7 +163,7 @@ class Dashboard:
     def accounts(self) -> list[dict[str, object]]:
         now = time.monotonic()
         with self.lock:
-            cache = self.status_cache
+            cache, generation = self.status_cache, self.status_generation
         if cache and now - cache[0] < 5:
             return cache[1]
         config = self._config()
@@ -162,10 +183,15 @@ class Dashboard:
 
         with ThreadPoolExecutor(max_workers=min(8, len(config.accounts))) as pool:
             results = list(pool.map(describe, config.accounts))
+        with self.lock:
+            stale = generation != self.status_generation
+        if stale:  # accounts changed while this pass ran: its list may miss or still show an account
+            return self.accounts()
         for item in results:
             self._observe_connection(str(item["name"]), bool(item["signed_in"]), str(item["status"]))
         with self.lock:
-            self.status_cache = (time.monotonic(), results)
+            if generation == self.status_generation:
+                self.status_cache = (time.monotonic(), results)
         return results
 
     def _record(self, message: str) -> None:
@@ -173,7 +199,7 @@ class Dashboard:
             self.messages.append(message.rstrip()[:1500])
 
     def _start(self, argv: list[str], kind: str, project: Path | None = None,
-               env: dict[str, str] | None = None) -> None:
+               env: dict[str, str] | None = None, stdin_text: str | None = None) -> None:
         with self.lock:
             if self.account_operation or (self.process is not None and self.process.poll() is None):
                 raise RotatorError("A task or sign-in is already running")
@@ -181,12 +207,19 @@ class Dashboard:
             self.last_exit_code = None
             try:
                 process = subprocess.Popen(
-                    argv, cwd=BASE_DIR, env=dict(env or os.environ, PYTHONIOENCODING="utf-8"), stdin=subprocess.DEVNULL,
+                    argv, cwd=self.config_path.parent, env=dict(env or os.environ, PYTHONIOENCODING="utf-8"),
+                    stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace", bufsize=1, **process_options(),
                 )
             except OSError as exc:
                 raise RotatorError(f"Could not start {kind}: {exc}") from exc
+            if stdin_text is not None:
+                try:
+                    process.stdin.write(stdin_text)
+                    process.stdin.close()
+                except OSError:
+                    pass  # it exited early; its output says why
             self.process = process
             self.process_kind = kind
             self.process_project = project
@@ -208,7 +241,7 @@ class Dashboard:
         with self.lock:
             if self.process is process:
                 self.last_exit_code = code
-                self.status_cache = None
+                self._invalidate_status()
 
     def start_task(self, project_text: str, task: str | None) -> None:
         if not project_text.strip():
@@ -233,9 +266,9 @@ class Dashboard:
                    "--config", str(self.config_path)]
         if task is None:
             command.extend(["resume", "--project", str(project)])
-        else:
-            command.extend(["run", "--project", str(project), task.strip()])
-        self._start(command, "task", project)
+        else:  # the task text goes in on stdin: argv is visible to every local user in the process list
+            command.extend(["run", "--project", str(project), "-"])
+        self._start(command, "task", project, stdin_text=None if task is None else task.strip())
 
     def login(self, name: str) -> None:
         config = self._config()
@@ -250,7 +283,7 @@ class Dashboard:
 
     def shared_status(self) -> dict[str, object]:
         try:
-            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            state = json.loads(shared_mode.STATE_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             state = {}
         if not isinstance(state, dict):
@@ -270,6 +303,7 @@ class Dashboard:
             "early_usage_check": True,
             "fallback_on_limit": state.get("fallback_on_limit", True),
             "session_usage": state.get("session_usage"),
+            "enabled_at": state.get("enabled_at"),
             "needs_keychain_update": bool(identities) and state.get("vault_version") != 4,
             "old_keychain_cleanup_pending": state.get("old_vault_cleanup_pending", []),
             "accounts": [{"name": a.name, "display_name": a.display_name,
@@ -282,13 +316,15 @@ class Dashboard:
         account = next((item for item in config.accounts if item.name == name), None)
         if account is None:
             raise RotatorError("This account is no longer in Switchboard")
-        status = next(item for item in self.accounts() if item["name"] == name)
+        status = next((item for item in self.accounts() if item["name"] == name), None)
+        if status is None:
+            raise RotatorError("This account is no longer in Switchboard")
         with self.activity_lock:
             activity = self._activity().get(name, {})
         if not isinstance(activity, dict):
             activity = {}
         try:
-            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            state = json.loads(shared_mode.STATE_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             state = {}
         if not isinstance(state, dict):
@@ -355,7 +391,7 @@ class Dashboard:
             binary = claude_binary(config)
             with shared_lock():
                 try:
-                    state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                    state = json.loads(shared_mode.STATE_FILE.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     state = {}
                 if not isinstance(state, dict):
@@ -381,9 +417,9 @@ class Dashboard:
                     pending = state.get("old_vault_cleanup_pending", [])
                     if isinstance(pending, list):
                         state["old_vault_cleanup_pending"] = [item for item in pending if item != name]
-                    limited = state.get("limited", {})
-                    if isinstance(limited, dict):
-                        limited.pop(name, None)
+                    for key in ("limited", "resets"):
+                        if isinstance(state.get(key), dict):
+                            state[key].pop(name, None)
                     state.get("login_errors", {}).pop(name, None)
                     if current:
                         state["current"] = None
@@ -391,11 +427,11 @@ class Dashboard:
                         state["history"] = [event for event in state["history"]
                                             if isinstance(event, dict) and name not in (event.get("from"), event.get("to"))]
                     state["updated_at"] = self._timestamp()
-                    atomic_json(STATE_FILE, state)
+                    atomic_json(shared_mode.STATE_FILE, state)
                 elif current:
                     state["current"] = None
                     state["updated_at"] = self._timestamp()
-                    atomic_json(STATE_FILE, state)
+                    atomic_json(shared_mode.STATE_FILE, state)
             if delete:
                 data = json.loads(self.config_path.read_text(encoding="utf-8"))
                 data["accounts"] = [item for item in data["accounts"] if item.get("name") != name]
@@ -409,7 +445,7 @@ class Dashboard:
         finally:
             with self.lock:
                 self.account_operation = False
-                self.status_cache = None
+                self._invalidate_status()
 
     def shared_action(self, action: str, account: str = "") -> None:
         if action not in {"setup", "enable", "disable", "switch", "fallback", "migrate"}:
@@ -434,16 +470,23 @@ class Dashboard:
 
     def stop(self) -> None:
         with self.lock:
-            process = self.process
+            process, kind = self.process, self.process_kind or ""
             if process is None or process.poll() is not None:
                 raise RotatorError("Nothing is running")
-        interrupt_process(process)
+            if kind.startswith("shared-"):
+                raise RotatorError("Wait for the switching change to finish")
+        # Claude exits 0 when a browser sign-in is interrupted, which would read as a successful sign-in.
+        interrupt_process(process, force=kind.startswith("login:"))
         self._record("Stop requested")
 
     def shutdown(self) -> None:
         with self.lock:
-            process = self.process
+            process, kind = self.process, self.process_kind or ""
         if process is not None and process.poll() is None:
+            if kind.startswith("shared-"):
+                # Interrupting a shared-login change can leave the shared login and the saved state disagreeing.
+                process.wait()
+                return
             try:
                 interrupt_process(process)
                 process.wait(timeout=10)
@@ -512,8 +555,9 @@ class Dashboard:
                 "config_dir": f"profile/{name}",
                 "threshold_percent": 95, "usage_command": None,
             })
+            load_config(self.config_path, data)  # e.g. profile/<name> already used by another account
             atomic_json(self.config_path, data)
-            self.status_cache = None
+            self._invalidate_status()
         self._account_event(name, "added", "Added to Switchboard")
 
     def set_display_name(self, name: str, display_name: str) -> None:
@@ -530,8 +574,9 @@ class Dashboard:
                    for item in data["accounts"]):
                 raise RotatorError("That display name is already in use")
             account["display_name"] = label
+            load_config(self.config_path, data)
             atomic_json(self.config_path, data)
-            self.status_cache = None
+            self._invalidate_status()
         self._account_event(name, "renamed", f"Renamed to {label}")
 
     def set_threshold(self, name: str, percent: float) -> None:
@@ -546,8 +591,11 @@ class Dashboard:
                 raise RotatorError("Unknown account")
             account["threshold_percent"] = percent
             atomic_json(self.config_path, data)
-            self.status_cache = None
+            self._invalidate_status()
         self._account_event(name, "settings", f"Usage threshold set to {percent:g}%")
+
+
+REQUEST_ERRORS = (RotatorError, ValueError, TypeError, OSError, KeyError, RuntimeError, subprocess.TimeoutExpired)
 
 
 def make_handler(dashboard: Dashboard, token: str):
@@ -596,30 +644,27 @@ def make_handler(dashboard: Dashboard, token: str):
                 return
             if not self._authorized():
                 return
-            if route.path == "/api/accounts":
-                self._send_json({"accounts": dashboard.accounts()})
-            elif route.path == "/api/account":
-                name = parse_qs(route.query).get("name", [""])[0]
-                try:
-                    self._send_json(dashboard.account_info(name))
-                except RotatorError as exc:
-                    self._send_json({"error": str(exc)}, 400)
-            elif route.path == "/api/task":
-                project = parse_qs(route.query).get("project", [None])[0]
-                self._send_json(dashboard.task_status(project))
-            elif route.path == "/api/shared":
-                self._send_json(dashboard.shared_status())
-            else:
-                self._send_json({"error": "Not found"}, 404)
+            try:
+                if route.path == "/api/accounts":
+                    self._send_json({"accounts": dashboard.accounts()})
+                elif route.path == "/api/account":
+                    self._send_json(dashboard.account_info(parse_qs(route.query).get("name", [""])[0]))
+                elif route.path == "/api/task":
+                    self._send_json(dashboard.task_status(parse_qs(route.query).get("project", [None])[0]))
+                elif route.path == "/api/shared":
+                    self._send_json(dashboard.shared_status())
+                else:
+                    self._send_json({"error": "Not found"}, 404)
+            except REQUEST_ERRORS as exc:
+                self._send_json({"error": str(exc)}, 400)
 
         def do_POST(self) -> None:
             if not self._authorized():
                 return
-            length = int(self.headers.get("Content-Length", "0"))
-            if length > 65536 or length < 2:
-                self._send_json({"error": "Invalid request size"}, 400)
-                return
             try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length > 65536 or length < 2:
+                    raise ValueError("Invalid request size")
                 data = json.loads(self.rfile.read(length))
                 if not isinstance(data, dict):
                     raise ValueError("Expected an object")
@@ -656,31 +701,42 @@ def make_handler(dashboard: Dashboard, token: str):
                     self._send_json({"error": "Not found"}, 404)
                     return
                 self._send_json({"ok": True})
-            except (RotatorError, ValueError, OSError, KeyError, json.JSONDecodeError) as exc:
+            except REQUEST_ERRORS as exc:
                 self._send_json({"error": str(exc)}, 400)
 
     return Handler
 
 
+def ensure_monitor(dashboard: Dashboard, config_path: Path) -> None:
+    """Point the monitor and the limit hook at this install. It can wait for a running usage read, so not inline."""
+    try:
+        state = json.loads(shared_mode.STATE_FILE.read_text(encoding="utf-8"))
+        if not (isinstance(state, dict) and state.get("enabled")):
+            return
+        proc = subprocess.run(
+            [sys.executable, str(BASE_DIR / "shared_mode.py"), "--config", str(config_path), "ensure-monitor"],
+            capture_output=True, text=True, timeout=180, check=False,
+        )
+        if proc.returncode == 0:
+            return
+        detail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        detail = [str(exc)]
+    error = f"The session usage monitor could not start. Turn switching off and on to retry. {detail[0]}".strip()
+    dashboard._record(error)
+    shared_mode.record_error(RotatorError(error))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=BASE_DIR / "rotator.json")
+    parser.add_argument("--config", type=Path, default=DATA_DIR / "rotator.json")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     config_path = args.config.expanduser().resolve()
+    shared_mode.use_config(config_path)
     load_config(config_path)
     dashboard = Dashboard(config_path)
-    try:
-        existing_state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        if isinstance(existing_state, dict) and existing_state.get("enabled"):
-            proc = subprocess.run(
-                [sys.executable, str(BASE_DIR / "shared_mode.py"), "--config", str(config_path), "ensure-monitor"],
-                capture_output=True, text=True, timeout=25, check=False,
-            )
-            if proc.returncode != 0:
-                dashboard._record("Session usage monitor could not start. Turn switching off and on to retry.")
-    except (OSError, ValueError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        pass
+    threading.Thread(target=ensure_monitor, args=(dashboard, config_path), daemon=True).start()
     token = secrets.token_urlsafe(32)
     try:
         server = ThreadingHTTPServer(("127.0.0.1", DASHBOARD_PORT), make_handler(dashboard, token))
@@ -691,11 +747,11 @@ def main() -> int:
         url_path = save_dashboard_url(config_path, url)
     except OSError:
         server.server_close()
-        raise RotatorError("Could not save the private dashboard link. Check the project folder's permissions and try again.")
+        raise RotatorError(f"Could not save the private dashboard link. Check the permissions of {config_path.parent} and try again.")
     print(f"Rotator dashboard: {url}", flush=True)
     print("Keep this window open while a task runs. Press Ctrl+C to close the dashboard.", flush=True)
     if not args.no_browser:
-        webbrowser.open(url)
+        open_dashboard(url)
     def stop_on_signal(signum, frame):
         raise KeyboardInterrupt
 
