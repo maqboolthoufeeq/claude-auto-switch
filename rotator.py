@@ -56,6 +56,10 @@ ENV_REMOVE = {
     "CLAUDE_CODE_USE_FOUNDRY",
     "CLAUDE_CODE_USE_MANTLE",
     "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    # The npm launcher runs this app through uv; its environment must not leak into the user's projects.
+    "UV_PROJECT_ENVIRONMENT",
+    "UV_RUN_RECURSION_DEPTH",
+    "VIRTUAL_ENV",
 }
 
 

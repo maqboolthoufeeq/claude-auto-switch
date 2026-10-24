@@ -4,7 +4,7 @@ For the dashboard setup, start with the [README](../README.md).
 
 ## Update an existing installation
 
-With npm, run `npm install -g cswitch@latest`, then start `cswitch`. Reopening the dashboard points the background monitor and the limit hook at the updated copy. Your data in `~/.cswitch` is kept.
+With npm: finish or pause any guided task, turn off automatic switching in the dashboard, and close the dashboard (Ctrl+C in its terminal). Then run `npm install -g cswitch@latest`, start `cswitch`, and turn automatic switching back on, which points the background monitor and the limit hook at the updated copy. Your data in `~/.cswitch` is kept. After changing Node.js versions (nvm, fnm, volta), install cswitch under the new version the same way.
 
 For a Git checkout:
 

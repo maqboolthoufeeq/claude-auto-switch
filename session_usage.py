@@ -55,8 +55,8 @@ def parse_session_reset(output: str, now: float | None = None) -> float | None:
     now = time.time() if now is None else now
     day = time.localtime(now)
     reset = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, hour, minute, 0, 0, 0, -1))
-    if reset <= now:
-        reset += 24 * 60 * 60
+    if reset <= now:  # tomorrow at that wall-clock time; mktime applies that day's UTC offset (DST)
+        reset = time.mktime((day.tm_year, day.tm_mon, day.tm_mday + 1, hour, minute, 0, 0, 0, -1))
     return reset if reset - now <= 5 * 60 * 60 + 300 else None
 
 
@@ -161,14 +161,20 @@ def stop_claude(process, master, env: dict[str, str], grace: float = 8.0) -> Non
     def alive() -> bool:
         return bool(process.isalive()) if windows else process.poll() is None
 
+    lock = Path(env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / ".oauth_refresh.lock"
+    start = time.monotonic()
+
+    def waiting() -> bool:  # `grace` to quit, up to 20 s more while a login refresh is in flight
+        elapsed = time.monotonic() - start
+        return alive() and (elapsed < grace or (lock.exists() and elapsed < grace + 20))
+
     try:
         for keys in ("\x1b", "/exit\r"):  # close the usage panel, then quit the way a user would
             if alive():
                 process.write(keys) if windows else os.write(master, keys.encode())
                 time.sleep(0.2)
-        end = time.monotonic() + grace
-        while alive() and time.monotonic() < end:
-            # Keep draining the terminal so Claude never blocks on a full pty while shutting down.
+        while waiting():
+            # Keep draining the terminal: a Claude blocked writing to a full pty can neither finish a refresh nor exit.
             if windows:
                 process.read(blocking=False)
             elif select.select([master], [], [], 0)[0]:
@@ -176,10 +182,8 @@ def stop_claude(process, master, env: dict[str, str], grace: float = 8.0) -> Non
             time.sleep(0.1)
     except Exception:  # pty closed, pywinpty read after exit: the process is gone or going
         pass
-    lock = Path(env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / ".oauth_refresh.lock"
-    end = time.monotonic() + 20
-    while alive() and lock.exists() and time.monotonic() < end:
-        time.sleep(0.5)  # a refresh is in flight; let it finish before forcing anything
+    while waiting():
+        time.sleep(0.5)  # draining failed; still never cut a refresh short
     if windows:
         if alive() and process.pid:
             kill_windows_tree(process.pid)
@@ -187,10 +191,13 @@ def stop_claude(process, master, env: dict[str, str], grace: float = 8.0) -> Non
     if alive():
         try:
             os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except OSError:  # already gone; macOS reports a group of exited processes as EPERM, not ESRCH
             pass
     try:
         process.wait(timeout=3)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
         process.wait(timeout=3)

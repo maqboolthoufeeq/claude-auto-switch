@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 import getpass
 import hashlib
 import json
@@ -26,7 +26,8 @@ from rotator import (
     claude_binary, load_config, usage_percent,
 )
 from session_usage import read_session_usage
-from platform_runtime import file_lock, interrupt_process, private_directory, process_options, windows_monitor_job
+from platform_runtime import (file_lock, interrupt_process, other_install_locks, popen_detached, private_directory,
+                              windows_monitor_job)
 import secure_store
 import background_monitor
 from platform_runtime import check_macos_version
@@ -40,6 +41,8 @@ COOLDOWN_SECONDS = 5 * 60 * 60
 # agents report those failures late. Limit reports this soon after a switch are about the previous account.
 LIMIT_REPORT_GRACE = 90
 NO_ACCOUNT_ERROR = "No prepared account is available. Sign in again to accounts with login errors, or wait for session usage to reset."
+MONITOR_ERROR = "The session usage monitor could not start."
+NOT_SIGNED_IN = "Claude is not signed in with a claude.ai subscription"
 
 
 def use_config(config_path: Path) -> None:
@@ -93,10 +96,13 @@ def old_vault_service(config_path: Path, account: Account) -> str:
 
 def keychain_read(service: str) -> str:
     require_macos()
-    proc = subprocess.run(
-        ["/usr/bin/security", "find-generic-password", "-a", getpass.getuser(), "-s", service, "-w"],
-        capture_output=True, text=True, timeout=20, check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/security", "find-generic-password", "-a", getpass.getuser(), "-s", service, "-w"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RotatorError("Keychain access timed out. Unlock your Keychain and try again.") from exc
     if proc.returncode != 0 or not proc.stdout.strip():
         raise RotatorError(f"No readable Keychain credential for {service}")
     return proc.stdout.rstrip("\n")
@@ -367,8 +373,10 @@ def auth_identity(binary: str, env: dict[str, str]) -> str:
         value = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         raise RotatorError(f"Could not verify Claude login: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RotatorError("Could not verify Claude login: unexpected `claude auth status` output")
     if proc.returncode != 0 or not value.get("loggedIn") or value.get("authMethod") != "claude.ai":
-        raise RotatorError("Claude is not signed in with a claude.ai subscription")
+        raise RotatorError(NOT_SIGNED_IN)
     email = value.get("email")
     if not isinstance(email, str) or "@" not in email:
         raise RotatorError("Claude did not report an email address; cannot verify account")
@@ -436,7 +444,7 @@ def setup(config: Config, config_path: Path) -> dict[str, Any]:
             try:
                 identity = auth_identity(binary, env)
             except RotatorError as exc:
-                if str(exc) == "Claude is not signed in with a claude.ai subscription":
+                if str(exc) == NOT_SIGNED_IN:
                     continue
                 raise
             email = identity.split("|", 1)[0]
@@ -450,12 +458,18 @@ def setup(config: Config, config_path: Path) -> dict[str, Any]:
             raise RotatorError("Sign in to at least two Claude profiles before preparing shared mode")
         if len(set(identities.values())) != len(identities):
             raise RotatorError("Each profile must have a different Claude account and organization")
-        imported = old.get("imported_tokens") if isinstance(old.get("imported_tokens"), dict) else {}
+        imported = old.get("imported_tokens") if isinstance(old.get("imported_tokens"), dict) else None
+        old_identities = old.get("identities") if isinstance(old.get("identities"), dict) else {}
+        old_errors = old.get("login_errors") if isinstance(old.get("login_errors"), dict) else {}
         for account in config.accounts:
             if account.name not in identities:
                 continue
             service = vault_service(config_path, account)
-            if imported.get(account.name) == tokens[account.name]:
+            if imported is not None:
+                keep = imported.get(account.name) == tokens[account.name]
+            else:  # state from before imported_tokens: keep a working vault copy, re-import repaired accounts
+                keep = old_identities.get(account.name) == identities[account.name] and account.name not in old_errors
+            if keep:
                 try:
                     # The profile still holds the token imported last time, which a switch has since spent and
                     # replaced in the vault. Re-importing it would break the account; sign-ins change the token.
@@ -493,16 +507,30 @@ def adopt_live_login(state: dict[str, Any], actual: str) -> bool:
 
 
 def sync_current(config: Config, config_path: Path, state: dict[str, Any]) -> str | None:
-    if state.get("current") is None:
-        return None
+    """Save the live shared login into its account's vault and return it, following the live login when it is
+    another prepared account. Returns None when nothing is signed in that could be saved or rolled back to."""
     binary = claude_binary(config)
-    actual = auth_identity(binary, shared_env())
-    if actual != state["identities"].get(state["current"]) and not adopt_live_login(state, actual):
+    try:
+        actual = auth_identity(binary, shared_env())
+    except RotatorError as exc:
+        if str(exc) != NOT_SIGNED_IN:
+            raise
+        try:
+            claude_credential(None)
+        except RotatorError:
+            return None  # signed out with nothing stored: the next login can only help
+        if state.get("current") is None:
+            return None
+        raise
+    if actual != state["identities"].get(state.get("current")) and not adopt_live_login(state, actual):
+        if state.get("current") is None:
+            return None  # not a prepared account; there is nothing of ours to save
         raise RotatorError("The shared Claude login changed outside Switchboard; refresh setup before switching")
     account = account_by_name(config, state["current"])
     raw = claude_credential(None)
     credential_parts(raw)
     keychain_write(vault_service(config_path, account), raw)
+    state.get("login_errors", {}).pop(account.name, None)  # its saved login is now the live, verified one
     return raw
 
 
@@ -514,8 +542,8 @@ def claude_login(binary: str, raw: str) -> bool:
     # `auth login` replaces the shared credential, so a login cut short can sign every Claude session out.
     # Give it its own session (Ctrl+C, a closing dashboard and Claude's hook cleanup never reach it) and never kill it.
     try:
-        proc = subprocess.Popen([binary, "auth", "login", "--claudeai"], env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **process_options())
+        proc = popen_detached([binary, "auth", "login", "--claudeai"], env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
         raise RotatorError(f"Claude login could not run: {exc}") from exc
     timeout = 90
@@ -540,8 +568,6 @@ def switch(config: Config, config_path: Path, state: dict[str, Any], target: Acc
     expected = state["identities"].get(target.name)
     if not expected:
         raise RotatorError(f"{target.display_name} has not been imported into shared-login mode")
-    if state.get("current") == target.name:
-        return state
     previous_raw = sync_current(config, config_path, state)
     if state.get("current") == target.name:  # the shared login already was this account
         state_save(state)
@@ -563,15 +589,19 @@ def switch(config: Config, config_path: Path, state: dict[str, Any], target: Acc
         credential_parts(fresh)
         keychain_write(vault_service(config_path, target), fresh)
     except RotatorError as exc:
-        if logged_in and not mismatch:
-            try:  # the login spent the saved refresh token; keep the one that replaced it before rolling back
+        try:
+            live = None if mismatch else auth_identity(binary, shared_env())
+        except RotatorError:
+            live = None
+        if not mismatch and (logged_in or live == expected):
+            try:  # the login spent the saved refresh token, even if it failed or timed out; keep its replacement
                 fresh = claude_credential(None)
                 credential_parts(fresh)
                 keychain_write(vault_service(config_path, target), fresh)
             except RotatorError:
                 pass
-        if previous_raw:
-            try:
+        if previous_raw and live != state["identities"].get(state.get("current")):
+            try:  # put the previous login back; skipped when it never left, which would only spend its token
                 claude_login(binary, previous_raw)
             except RotatorError:
                 pass
@@ -634,29 +664,43 @@ def rotate(config: Config, config_path: Path, reason: str, expected_current: str
         history = state.get("history", [])
         if reason == "rate_limit" and not state.get("fallback_on_limit", True):
             return state
-        if reason == "rate_limit" and history and time.time() - float(history[-1].get("at", 0)) < LIMIT_REPORT_GRACE:
-            return state  # A late report about the login that was just replaced, not about the new one.
+        last = max(float(history[-1].get("at", 0)) if history else 0.0, float(state.get("limit_attempt_at", 0)))
+        if reason == "rate_limit" and time.time() - last < LIMIT_REPORT_GRACE:
+            # A late report about the login that was just replaced, or one queued behind a failed attempt.
+            return state
         if reason == "rate_limit" and state.get("current"):
+            try:
+                actual = auth_identity(claude_binary(config), shared_env())
+            except RotatorError:
+                actual = None
+            if actual and actual != state["identities"].get(state["current"]) and adopt_live_login(state, actual):
+                state_save(state)  # the report may be about either login; the adoption starts the grace window
+                return state
             mark_limited(state, state["current"])
         target = next_account(config, state)
         if target is None:
-            state["last_error"] = "No account is available to switch to"
+            state["last_error"] = NO_ACCOUNT_ERROR
             state_save(state)
             return state
         try:
             return switch(config, config_path, state, target, reason)
         except RotatorError as exc:
             state["last_error"] = str(exc)
+            if reason == "rate_limit":
+                state["limit_attempt_at"] = time.time()  # stamped when the attempt ends; one can outlast the grace
             state_save(state)
             raise
 
 
-def record_error(exc: Exception) -> None:
-    """Show an error from a background process on the dashboard, when state can be written at all."""
+def record_error(exc: Exception, tick: bool = False) -> None:
+    """Show an error from a background process on the dashboard, when state can be written at all.
+    A monitor tick's error (tick=True) is cleared again by the next healthy tick."""
     try:
         with shared_lock():
             state = state_read()
             state["last_error"] = str(exc)
+            if tick:
+                state["tick_error"] = str(exc)
             state_save(state)
     except (RotatorError, OSError):
         pass
@@ -671,9 +715,8 @@ def hook(config_path: Path) -> None:
         return
     # Claude ends a hook's process tree when its session exits (a `claude -p` run does so right after the error),
     # which could cut `claude auth login` short. Run the switch in its own session and return at once.
-    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--config", str(config_path), "limit"],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     **process_options())
+    popen_detached([sys.executable, str(Path(__file__).resolve()), "--config", str(config_path), "limit"],
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def limit(config_path: Path) -> None:
@@ -766,7 +809,7 @@ def retire_agent(plist: Path, domain: str) -> None:
     except (OSError, ValueError, plistlib.InvalidFileException):
         logs = None
     state_dir = Path(logs).parent if isinstance(logs, str) else None
-    with file_lock(state_dir / "reader.lock") if state_dir and state_dir.is_dir() else nullcontext():
+    with other_install_locks(state_dir if state_dir != STATE_DIR else None):
         subprocess.run(["launchctl", "bootout", domain, str(plist)], capture_output=True, check=False, timeout=10)
     plist.unlink(missing_ok=True)
 
@@ -826,8 +869,8 @@ def watch(config: Config | None, config_path: Path, interval: int = 30) -> None:
         time.sleep(interval)
         try:
             check_usage(config_path)
-        except (RotatorError, OSError) as exc:
-            record_error(exc)
+        except Exception as exc:  # any bad tick: record it and keep monitoring
+            record_error(exc, tick=True)
 
 
 def check_usage(config_path: Path) -> None:
@@ -854,23 +897,23 @@ def check_usage(config_path: Path) -> None:
             return
         state["session_usage"] = {"account": current, "percent": percent,
                                   "checked_at": time.time(), "error": error}
-        if percent is not None:
-            try:
-                actual = auth_identity(claude_binary(config), shared_env())
-                if actual != state["identities"].get(current):
-                    if adopt_live_login(state, actual):
-                        state_save(state)
-                        return  # measure the adopted account on the next tick
-                    raise RotatorError("The shared login changed outside Switchboard. Update prepared accounts before resuming session checks.")
-            except RotatorError as exc:
+        try:
+            actual = auth_identity(claude_binary(config), shared_env())
+            if actual != state["identities"].get(current):
+                if adopt_live_login(state, actual):
+                    state_save(state)
+                    return  # measure the adopted account on the next tick
+                raise RotatorError("The shared login changed outside Switchboard. Update prepared accounts before resuming session checks.")
+        except RotatorError as exc:
+            if percent is not None:
                 state["session_usage"].update({"percent": None, "error": str(exc)})
-                state_save(state)
-                return
+            state_save(state)
+            return
         if percent is None or percent < account.threshold_percent:
             if percent is not None:  # fresh evidence this account has room again
                 state.get("limited", {}).pop(current, None)
                 state.get("resets", {}).pop(current, None)
-                if state.get("last_error") == NO_ACCOUNT_ERROR:
+                if state.get("last_error") in (NO_ACCOUNT_ERROR, state.pop("tick_error", None)):
                     state["last_error"] = None
             state_save(state)
             return
@@ -907,7 +950,10 @@ def main() -> int:
     args = parser.parse_args()
     config_path = args.config.expanduser().resolve()
     use_config(config_path)
-    os.chdir(BASE_DIR)  # hooks start in the Claude session's folder; Windows looks up claude.exe there first
+    if config_path.parent.is_dir():
+        # Hooks start in the Claude session's folder, where Windows looks up claude.exe first. Not the package
+        # folder either: a long-running monitor there blocks npm upgrades on Windows.
+        os.chdir(config_path.parent)
     if args.action in ("enable", "ensure-monitor", "migrate") and "_npx" in Path(__file__).resolve().parts:
         # The hook and the monitor run this file later; npx deletes its cached copies at any time.
         raise RotatorError("Automatic switching needs an installed copy of cswitch. Run: npm install -g cswitch")
@@ -920,9 +966,9 @@ def main() -> int:
     elif args.action == "enable":
         with shared_lock():
             state = state_read()
+            sync_current(config, config_path, state)  # follows a /login to a prepared account
             if not state.get("current"):
                 raise RotatorError("The shared login is not a prepared account yet. Run switch <account> (or Switch account in the dashboard) first")
-            sync_current(config, config_path, state)
             install_hook(config_path, settings)
             try:
                 install_agent(config_path)
@@ -931,6 +977,8 @@ def main() -> int:
                 raise
             state["enabled"] = True
             state["enabled_at"] = time.time()
+            if str(state.get("last_error") or "").startswith(MONITOR_ERROR):
+                state["last_error"] = None
             state_save(state)
         print("Shared-login rotation enabled for local Claude terminals using the default configuration")
     elif args.action == "disable":
@@ -967,6 +1015,9 @@ def main() -> int:
             if state.get("enabled") and state.get("vault_version") == 4:
                 install_hook(config_path, settings)  # the interpreter or script path may have moved (npm upgrade)
                 install_agent(config_path)
+                if str(state.get("last_error") or "").startswith(MONITOR_ERROR):
+                    state["last_error"] = None
+                    state_save(state)
     elif args.action == "migrate":
         with shared_lock():
             state = migrate_vault(config, config_path, state_read())

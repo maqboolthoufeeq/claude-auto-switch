@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import errno
 import os
 import platform
@@ -116,6 +116,37 @@ def interrupt_process(process: subprocess.Popen, force: bool = False) -> None:
             pass
 
 
+def popen_detached(argv: list[str], **kwargs) -> subprocess.Popen:
+    """Start a process that must outlive its parent's terminal, process group and Windows job (a shared-login change)."""
+    if sys.platform != "win32":
+        return subprocess.Popen(argv, start_new_session=True, **kwargs)
+    # A hidden console of its own, so closing the launching window sends it no CTRL_CLOSE_EVENT, outside the monitor's job.
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    try:
+        return subprocess.Popen(argv, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+    except OSError:  # the parent's job does not allow breakaway
+        return subprocess.Popen(argv, creationflags=flags, **kwargs)
+
+
+@contextmanager
+def other_install_locks(state_dir: Path | None, wait: float = 120):
+    """Hold another install's switch and reader locks while its monitor is stopped, so a switch or a /usage read in
+    progress is never cut short. Give up after `wait` seconds rather than deadlock with an install retiring this one."""
+    with ExitStack() as held:
+        if state_dir is not None and state_dir.is_dir():
+            deadline = time.monotonic() + wait
+            for name in ("lock", "reader.lock"):
+                while True:
+                    try:
+                        held.enter_context(file_lock(state_dir / name, blocking=False))
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() > deadline:
+                            break
+                        time.sleep(0.5)
+        yield
+
+
 def kill_windows_tree(pid: int) -> None:
     subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                    capture_output=True, timeout=15, check=False)
@@ -151,7 +182,8 @@ def windows_monitor_job() -> None:
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     handle = kernel.CreateJobObjectW(None, None)
     limits = ExtendedLimits()
-    limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    # KILL_ON_JOB_CLOSE | BREAKAWAY_OK: only children started with CREATE_BREAKAWAY_FROM_JOB (logins) leave the job.
+    limits.BasicLimitInformation.LimitFlags = 0x2000 | 0x800
     if not handle:
         raise RotatorError("Windows could not create a safe background monitor process group")
     if (not kernel.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits))

@@ -1,9 +1,8 @@
-const tokenFromLink = new URLSearchParams(location.hash.slice(1)).get("token");
-if (tokenFromLink) {
-  sessionStorage.setItem("switchboard-token", tokenFromLink);
-  history.replaceState(null, "", location.pathname);
-}
-const token = sessionStorage.getItem("switchboard-token");
+// The launcher opens the page with a single-use #code (or the terminal's #token link); keep neither in the address bar.
+const linkParams = new URLSearchParams(location.hash.slice(1));
+if (location.hash) history.replaceState(null, "", location.pathname);
+if (linkParams.get("token")) sessionStorage.setItem("switchboard-token", linkParams.get("token"));
+let token = sessionStorage.getItem("switchboard-token");
 const $ = (id) => document.getElementById(id);
 let accounts = [];
 let accountsLoaded = false;
@@ -162,6 +161,7 @@ function makeAccountRow(account, index) {
     try {
       await api("/api/display-name", { name: account.name, display_name: nameInput.value.trim() });
       notice("Account name saved.", "success");
+      nameInput.blur();
       await refreshAccounts();
       await refreshShared();
     } catch (error) { notice(friendlyError(error), "error"); }
@@ -193,6 +193,7 @@ function makeAccountRow(account, index) {
       try {
         await api("/api/threshold", { name: account.name, percent: value });
         notice("Switching threshold saved.", "success");
+        input.blur();
         await refreshAccounts();
       } catch (error) { notice(friendlyError(error), "error"); }
       finally { save.disabled = false; }
@@ -205,7 +206,7 @@ function makeAccountRow(account, index) {
 
 function renderAccounts() {
   const key = JSON.stringify([accountsLoaded, accounts, sharedInfo?.current, sharedInfo?.login_errors, sharedInfo?.accounts?.map((account) => [account.name, account.prepared])]);
-  if (key === accountRenderKey || document.activeElement?.closest(".account-settings")) return;
+  if (key === accountRenderKey || document.activeElement?.matches(".account-settings input")) return;
   accountRenderKey = key;
   $("accounts").replaceChildren(...accounts.map(makeAccountRow));
   const ready = sharedInfo?.accounts?.filter((account) => account.prepared && !sharedInfo?.login_errors?.[account.name]).length || 0;
@@ -447,7 +448,7 @@ function renderShared() {
     return item;
   }));
   $("shared-error").hidden = !data?.last_error;
-  $("shared-error").textContent = data?.last_error ? "Last switch failed: " + data.last_error : "";
+  $("shared-error").textContent = data?.last_error ? "Needs attention: " + data.last_error : "";
   renderAccounts();
 }
 
@@ -626,8 +627,23 @@ $("account-confirm-proceed").addEventListener("click", async () => {
   finally { $("account-confirm-proceed").disabled = false; }
 });
 
-if (!token) notice("Open Switchboard using the link printed by its launcher.", "error");
-else {
+async function start() {
+  const code = linkParams.get("code");
+  if (code) {
+    try {
+      const response = await fetch("/api/redeem", { method: "POST", credentials: "omit",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
+      const result = await response.json().catch(() => ({}));
+      if (response.ok && result.token) {
+        token = result.token;
+        sessionStorage.setItem("switchboard-token", token);
+      }
+    } catch (_) { /* the notice below explains what to do */ }
+  }
+  if (!token) {
+    notice("Open Switchboard using the link printed by its launcher.", "error");
+    return;
+  }
   refreshAll();
   setInterval(async () => {
     const results = await Promise.allSettled([refreshTask(), refreshShared()]);
@@ -637,6 +653,7 @@ else {
     $("connection").textContent = failed ? "Disconnected" : "Connected locally";
   }, 2500);
   setInterval(() => {
-    if (!document.activeElement?.closest(".account-settings")) refreshAccounts().catch(() => {});
+    if (!document.activeElement?.matches(".account-settings input")) refreshAccounts().catch(() => {});
   }, 15000);
 }
+start();

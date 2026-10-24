@@ -29,7 +29,7 @@ npm install -g cswitch
 cswitch
 ```
 
-`cswitch` keeps its configuration, profiles, and state in `~/.cswitch`; set `CSWITCH_HOME` to use another folder. The first run prepares a private Python environment there. `cswitch help` lists the terminal commands.
+`cswitch` keeps its configuration, profiles, and state in `~/.cswitch`; set `CSWITCH_HOME` to use another folder. The first run prepares a private Python environment there. `cswitch help` lists the terminal commands. The background monitor and the Claude limit hook run files from the installed package, so run `cswitch disable` before `npm uninstall -g cswitch` or before removing the Node.js version it was installed with.
 
 Or run it from a Git checkout in Terminal or PowerShell:
 
@@ -94,7 +94,7 @@ Turn off automatic switching, then open **Run a guided task**. Choose your proje
 ## Privacy and limits
 
 - Saved switching credentials live in **macOS Keychain**, **Linux Secret Service**, or **Windows Credential Manager**. Switchboard never falls back to plaintext for its saved switching copies. Claude manages its own active credential files on Linux and Windows.
-- Profiles, configuration, private dashboard links, and logs stay in the data folder. They are excluded from Git and never part of the npm package. Sign in separately on each computer; do not copy or publish profile folders.
+- Profiles, configuration, private dashboard links, and monitor logs stay in the data folder. A guided task keeps its handoff and logs in the code project's `.claude-rotator/` folder. All of these are excluded from Git and never part of the npm package. Sign in separately on each computer; do not copy or publish profile folders.
 - The dashboard runs locally and requires its private launcher link. Opening `ui/index.html` directly does not connect it.
 - Terminal chats must use the default Claude login. Separate profiles, API keys, and fixed OAuth tokens do not follow shared switching.
 - Changes to Claude's `/usage` display can make percentage checks unavailable. Keep the limit fallback enabled if you want switching to continue at reported limits.

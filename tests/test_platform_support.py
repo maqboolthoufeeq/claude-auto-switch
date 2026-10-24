@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -54,6 +55,36 @@ class PlatformTests(unittest.TestCase):
              patch.object(rotator.shutil, "which", return_value="C:/Claude/custom.cmd"):
             with self.assertRaises(RotatorError):
                 rotator.claude_binary(config)
+    def test_retiring_another_install_waits_for_its_switch_to_finish(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            other = root / "old" / ".shared-rotator"
+            other.mkdir(parents=True)
+            units = root / "config" / "systemd" / "user"
+            units.mkdir(parents=True)
+            stale = units / "switchboard-0123456789ab.service"
+            stale.write_text(f'ExecStart="/usr/bin/python3" "/old/shared_mode.py" "--config" "{root / "old" / "rotator.json"}" "watch"\n')
+            events, held, release = [], threading.Event(), threading.Event()
+            def switching():  # the old install's monitor is in the middle of a switch
+                with platform_runtime.file_lock(other / "lock"):
+                    held.set()
+                    release.wait(5)
+                    events.append("switch done")
+            worker = threading.Thread(target=switching)
+            worker.start()
+            held.wait(5)
+            threading.Timer(0.5, release.set).start()
+            def run(argv, **kwargs):
+                if argv[:3] == ["systemctl", "--user", "disable"]:
+                    events.append("stopped")
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(root / "config")}), \
+                 patch.object(background_monitor.sys, "platform", "linux"), \
+                 patch.object(background_monitor.subprocess, "run", side_effect=run):
+                background_monitor.retire_others(root / "new" / "rotator.json", root / "new" / ".shared-rotator")
+            worker.join(5)
+            self.assertEqual(events, ["switch done", "stopped"])
+            self.assertFalse(stale.exists())
+
     def test_windows_json_save_retries_while_a_reader_has_the_file_open(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "state.json"
@@ -76,14 +107,18 @@ class PlatformTests(unittest.TestCase):
             (directory / ".shared-rotator").mkdir()
             link = "http://127.0.0.1:56729/#token=test-only"
             (directory / ".shared-rotator" / "dashboard-url").write_text(link)
+            opener = MagicMock()
+            opener.open.return_value.__enter__.return_value.read.return_value = b'{"code": "one-time"}'
             with patch.object(launch, "DATA_DIR", directory), \
-                 patch.object(launch.urllib.request, "urlopen", return_value=MagicMock()) as probe, \
+                 patch.object(launch.urllib.request, "build_opener", return_value=opener) as build, \
                  patch.object(launch, "open_dashboard") as browser, \
-                 patch.object(launch, "dashboard_main") as start:
+                 patch.object(launch, "dashboard_main") as start, \
+                 patch("sys.stdout", new=io.StringIO()):
                 self.assertEqual(launch.main(), 0)
-                browser.assert_called_once_with(link)
+                browser.assert_called_once_with("one-time")
                 start.assert_not_called()
-            self.assertEqual(probe.call_args.args[0].get_header("X-rotator-token"), "test-only")
+            self.assertEqual(opener.open.call_args.args[0].get_header("X-rotator-token"), "test-only")
+            self.assertEqual(build.call_args.args[0].proxies, {})  # the token never goes to a configured proxy
 
     def test_launcher_starts_its_own_dashboard_when_the_saved_link_is_rejected(self):
         with tempfile.TemporaryDirectory() as root:
@@ -91,10 +126,12 @@ class PlatformTests(unittest.TestCase):
             (directory / ".shared-rotator").mkdir()
             (directory / ".shared-rotator" / "dashboard-url").write_text("http://127.0.0.1:56729/#token=stale")
             (directory / "rotator.json").write_text("{}")
-            refused = launch.urllib.error.HTTPError("http://127.0.0.1:56729/api/task", 403, "Access denied", {}, None)
+            refused = launch.urllib.error.HTTPError("http://127.0.0.1:56729/api/task", 403, "Access denied", {}, io.BytesIO())
             self.addCleanup(refused.close)
+            opener = MagicMock()
+            opener.open.side_effect = refused
             with patch.object(launch, "DATA_DIR", directory), \
-                 patch.object(launch.urllib.request, "urlopen", side_effect=refused), \
+                 patch.object(launch.urllib.request, "build_opener", return_value=opener), \
                  patch.object(launch, "open_dashboard") as browser, \
                  patch.object(launch, "dashboard_main", return_value=0) as start:
                 self.assertEqual(launch.main(), 0)

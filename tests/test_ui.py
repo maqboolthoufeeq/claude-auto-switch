@@ -5,8 +5,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from unittest.mock import Mock, patch
 
 import rotator_ui
@@ -132,6 +135,37 @@ class DashboardTests(unittest.TestCase):
              patch.object(shared_mode, "STATE_FILE", self.root / "missing-state.json"):
             self.assertEqual([item["name"] for item in self.dashboard.accounts()], ["account-1", "account-2"])
             self.assertEqual(self.dashboard.account_info("account-2")["name"], "account-2")
+
+    def test_link_code_opens_the_dashboard_once_and_only_from_this_computer(self):
+        server = rotator_ui.ThreadingHTTPServer(("127.0.0.1", 0), rotator_ui.make_handler(self.dashboard, "test-token"))
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        def post(path, body, **headers):
+            request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}{path}", method="POST",
+                                             data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json", **headers})
+            try:
+                with opener.open(request, timeout=5) as response:
+                    return response.status, json.loads(response.read())
+            except urllib.error.HTTPError as error:
+                with error:
+                    return error.code, json.loads(error.read())
+        self.assertEqual(post("/api/link-code", {})[0], 403)  # asking for a code needs the token
+        code = post("/api/link-code", {}, **{"X-Rotator-Token": "test-token"})[1]["code"]
+        self.assertEqual(post("/api/redeem", {"code": code}, Origin="http://evil.example")[0], 403)
+        self.assertEqual(post("/api/redeem", {"code": code}), (200, {"token": "test-token"}))
+        self.assertEqual(post("/api/redeem", {"code": code})[0], 403)  # single use
+
+    def test_cancelled_sign_in_is_not_reported_as_a_failure(self):
+        self.dashboard._start([sys.executable, "-c", "import time; time.sleep(30)"], "login:account-1")
+        self.dashboard.stop()
+        deadline = time.monotonic() + 30
+        while "Sign-in cancelled" not in (status := self.dashboard.task_status(None))["messages"] or status["busy"]:
+            self.assertLess(time.monotonic(), deadline, "the cancelled sign-in did not finish")
+            time.sleep(0.05)
+        self.assertIsNone(status["exit_code"])  # so the switching panel shows no failed change
 
     def test_shutdown_lets_shared_login_change_finish(self):
         self.dashboard._start([sys.executable, "-c", "import time; time.sleep(0.5)"], "shared-switch")

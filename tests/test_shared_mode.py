@@ -88,12 +88,14 @@ class SharedModeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        self.addCleanup(os.chdir, os.getcwd())  # main() changes into the data folder; leave it before it is deleted
         self.root = Path(self.temp.name)
         self.config_path = self.root / "rotator.json"
         self.accounts = [Account(f"account-{n}", f"Seat {n}", "same@example.com",
                                  self.root / f"profile-{n}", 95, None) for n in (1, 2)]
         self.config = Config("claude", "auto", 5, self.accounts)
         self.current_identity = "same@example.com|org-1"
+        self.logins = []
         self.keychain = {}
         for n, account in enumerate(self.accounts, 1):
             self.keychain[shared_mode.keychain_service(account.config_dir)] = self.raw(n, 1)
@@ -133,11 +135,14 @@ class SharedModeTests(unittest.TestCase):
         if "CLAUDE_CONFIG_DIR" in env:
             account = next(a for a in self.accounts if str(a.config_dir) == env["CLAUDE_CONFIG_DIR"])
             return f"{account.email}|org-{account.name[-1]}"
+        if self.current_identity is None:
+            raise RotatorError(shared_mode.NOT_SIGNED_IN)
         return self.current_identity
 
     def run_claude(self, argv, **kwargs):
         self.assertEqual(argv, ["/fake/claude", "auth", "login", "--claudeai"])
         token = kwargs["env"]["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"]
+        self.logins.append(token)
         account = int(token.split("-")[1])
         version = int(token.split("-")[2]) + 1
         self.current_identity = f"same@example.com|org-{account}"
@@ -503,18 +508,18 @@ class SharedModeTests(unittest.TestCase):
             self.assertEqual(json.loads(settings.read_text()), value)
 
 
-    def test_hook_runs_from_the_app_folder_not_the_claude_session_folder(self):
-        # Windows finds claude.exe and powershell.exe in the current folder first.
+    def test_hook_runs_from_the_data_folder_not_the_claude_session_folder(self):
+        # Windows finds claude.exe and powershell.exe in the current folder first; the package folder would be
+        # pinned by the long-running monitor and block npm upgrades.
         session = self.root / "someone else's repo"
         session.mkdir()
-        self.addCleanup(os.chdir, os.getcwd())
         os.chdir(session)
         seen = []
         with patch.object(shared_mode.subprocess, "Popen", side_effect=lambda *a, **k: seen.append(Path.cwd())), \
              patch("sys.stdin", io.StringIO('{"error":"rate_limit"}')), \
              patch("sys.argv", ["shared_mode.py", "--config", str(self.config_path), "hook"]):
             shared_mode.main()
-        self.assertEqual(seen, [shared_mode.BASE_DIR])
+        self.assertEqual(seen, [self.config_path.resolve().parent])
 
     def test_enabling_a_monitor_retires_monitors_of_other_installs(self):
         agents = self.root / "LaunchAgents"
@@ -544,6 +549,102 @@ class SharedModeTests(unittest.TestCase):
         updated = shared_mode.state_read()
         self.assertEqual(updated["current"], "account-1")
         self.assertIsNone(updated["last_error"])
+
+
+    def test_limit_report_follows_the_live_login_instead_of_resting_the_stale_account(self):
+        self.enabled_setup()
+        self.current_identity = "same@example.com|org-2"  # someone ran /login with account-2
+        self.limit()
+        state = shared_mode.state_read()
+        self.assertEqual(state["current"], "account-2")
+        self.assertNotIn("account-1", state.get("limited", {}))
+        self.assertEqual(self.logins, [])
+
+    def test_reports_queued_behind_a_failed_attempt_do_not_repeat_it(self):
+        self.enabled_setup()
+        with patch.object(shared_mode, "claude_login",
+                          side_effect=RotatorError("Claude login did not finish within 90 seconds")) as login:
+            self.limit()
+            self.limit()
+        self.assertEqual(login.call_count, 1)  # no rollback login either: the shared login never changed
+        self.assertIn("limit_attempt_at", shared_mode.state_read())
+
+    def test_rejected_login_does_not_spend_the_unchanged_shared_login(self):
+        state = shared_mode.setup(self.config, self.config_path)
+        with patch.object(shared_mode, "claude_login", return_value=False) as login:
+            with self.assertRaises(RotatorError):
+                shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
+        self.assertEqual(login.call_count, 1)
+
+    def test_login_that_timed_out_but_landed_keeps_the_rotated_token(self):
+        state = shared_mode.setup(self.config, self.config_path)
+        calls = []
+        def login(binary, raw):
+            calls.append(raw)
+            self.run_claude(["/fake/claude", "auth", "login", "--claudeai"],
+                            env={"CLAUDE_CODE_OAUTH_REFRESH_TOKEN": json.loads(raw)["claudeAiOauth"]["refreshToken"]})
+            if len(calls) == 1:
+                raise RotatorError("Claude login did not finish within 90 seconds")
+            return True
+        with patch.object(shared_mode, "claude_login", side_effect=login):
+            with self.assertRaises(RotatorError):
+                shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
+        self.assertIn("refresh-2-2", self.keychain[shared_mode.vault_service(self.config_path, self.accounts[1])])
+        self.assertEqual(self.current_identity, "same@example.com|org-1")
+
+    def test_a_signed_out_shared_login_can_be_switched_back_in(self):
+        state = shared_mode.setup(self.config, self.config_path)
+        self.current_identity = None
+        del self.keychain[shared_mode.keychain_service(None)]
+        shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
+        self.assertEqual(shared_mode.state_read()["current"], "account-2")
+        self.assertEqual(self.current_identity, "same@example.com|org-2")
+
+    def test_manual_switch_checks_the_live_login_and_clears_a_repaired_error(self):
+        state = shared_mode.setup(self.config, self.config_path)
+        state["login_errors"] = {"account-2": "Claude rejected the saved login"}
+        self.current_identity = "same@example.com|org-2"  # repaired with /login in a terminal
+        shared_mode.switch(self.config, self.config_path, state, self.accounts[0], "manual")
+        state = shared_mode.state_read()
+        self.assertEqual(self.current_identity, "same@example.com|org-1")
+        self.assertEqual(state["current"], "account-1")
+        self.assertNotIn("account-2", state.get("login_errors", {}))
+
+    def test_prepare_after_upgrade_keeps_rotated_logins_from_older_state(self):
+        shared_mode.setup(self.config, self.config_path)
+        shared_mode.switch(self.config, self.config_path, shared_mode.state_read(), self.accounts[1], "manual")
+        shared_mode.switch(self.config, self.config_path, shared_mode.state_read(), self.accounts[0], "manual")
+        vault = shared_mode.vault_service(self.config_path, self.accounts[1])
+        state = shared_mode.state_read()
+        del state["imported_tokens"]  # written by a release before imported_tokens
+        shared_mode.state_save(state)
+        shared_mode.setup(self.config, self.config_path)
+        self.assertIn("refresh-2-2", self.keychain[vault])
+        state = shared_mode.state_read()
+        del state["imported_tokens"]
+        state["login_errors"] = {"account-2": "Claude rejected the saved login"}  # repaired by signing in again
+        shared_mode.state_save(state)
+        shared_mode.setup(self.config, self.config_path)
+        self.assertIn("refresh-2-1", self.keychain[vault])
+
+    def test_monitor_survives_any_bad_tick_and_clears_its_error_when_healthy(self):
+        self.enabled_setup()
+        with patch.object(shared_mode, "load_config",
+                          side_effect=[subprocess.TimeoutExpired("security", 20), self.config]), \
+             patch.object(shared_mode, "read_session_usage", return_value=(10.0, None, None)), \
+             patch.object(shared_mode.time, "sleep", side_effect=[None, None, StopIteration]):
+            with self.assertRaises(StopIteration):
+                shared_mode.watch(None, self.config_path)
+        self.assertIsNone(shared_mode.state_read()["last_error"])
+
+    def test_monitor_start_clears_an_earlier_monitor_error(self):
+        state = self.enabled_setup()
+        state["last_error"] = shared_mode.MONITOR_ERROR + " Could not start the background usage monitor"
+        shared_mode.state_save(state)
+        with patch.object(shared_mode, "install_hook"), patch.object(shared_mode, "install_agent"), \
+             patch("sys.argv", ["shared_mode.py", "--config", str(self.config_path), "ensure-monitor"]):
+            shared_mode.main()
+        self.assertIsNone(shared_mode.state_read()["last_error"])
 
 
 if __name__ == "__main__":

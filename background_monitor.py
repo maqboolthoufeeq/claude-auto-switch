@@ -7,12 +7,13 @@ import csv
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
 
-from platform_runtime import RotatorError, powershell_env
+from platform_runtime import RotatorError, other_install_locks, powershell_env
 
 
 def identity(config_path: Path) -> str:
@@ -40,27 +41,52 @@ def run_checked(argv: list[str], error: str) -> None:
         raise RotatorError(error)
 
 
-def retire_others(config_path: Path) -> None:
-    """One monitor per user: stop monitors registered for another config path (an older install or folder)."""
+def state_dir_of(arguments: list[str], own: Path) -> Path | None:
+    """The state folder of the monitor started with these arguments, unless it is this install's own."""
+    try:
+        folder = Path(arguments[arguments.index("--config") + 1]).parent / ".shared-rotator"
+    except (ValueError, IndexError):
+        return None
+    return None if folder == own else folder
+
+
+def retire_others(config_path: Path, state_dir: Path) -> None:
+    """One monitor per user: stop monitors registered for another config path (an older install or folder),
+    after its switch or /usage read in progress has finished."""
     own = identity(config_path)
     if sys.platform.startswith("linux"):
         for unit in linux_unit_path(config_path).parent.glob("switchboard-*.service"):
-            if unit.stem != own:
+            if unit.stem == own:
+                continue
+            try:
+                start = next(line for line in unit.read_text(encoding="utf-8").splitlines() if line.startswith("ExecStart="))
+                arguments = [arg.replace("$$", "$").replace("%%", "%") for arg in shlex.split(start[len("ExecStart="):])]
+            except (OSError, StopIteration, ValueError):
+                arguments = []
+            with other_install_locks(state_dir_of(arguments, state_dir)):
                 subprocess.run(["systemctl", "--user", "disable", "--now", unit.name], capture_output=True, timeout=20, check=False)
-                unit.unlink(missing_ok=True)
+            unit.unlink(missing_ok=True)
     elif sys.platform == "win32":
         tasks = subprocess.run(["schtasks", "/Query", "/FO", "CSV", "/NH"], capture_output=True, text=True,
                                errors="replace", timeout=20, check=False)
         for row in csv.reader((tasks.stdout or "").splitlines()):
             name = row[0].lstrip("\\") if row else ""
-            if re.fullmatch(r"switchboard-[0-9a-f]{12}", name) and name != own:
+            if not re.fullmatch(r"switchboard-[0-9a-f]{12}", name) or name == own:
+                continue
+            query = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                                    "(Get-ScheduledTask -TaskName $env:SWITCHBOARD_TASK_NAME).Actions[0].Arguments"],
+                                   env=dict(powershell_env(), SWITCHBOARD_TASK_NAME=name), capture_output=True,
+                                   text=True, errors="replace", timeout=20, check=False)
+            found = re.search(r'--config\s+(?:"([^"]+)"|(\S+))', query.stdout or "")
+            arguments = ["--config", found.group(1) or found.group(2)] if found else []
+            with other_install_locks(state_dir_of(arguments, state_dir)):
                 subprocess.run(["schtasks", "/End", "/TN", name], capture_output=True, timeout=20, check=False)
-                subprocess.run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True, timeout=20, check=False)
+            subprocess.run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True, timeout=20, check=False)
 
 
 def install(config_path: Path, state_dir: Path, script: Path) -> None:
     argv = [sys.executable, str(script), "--config", str(config_path), "watch"]
-    retire_others(config_path)
+    retire_others(config_path, state_dir)
     if sys.platform.startswith("linux"):
         path = linux_unit_path(config_path)
         path.parent.mkdir(parents=True, exist_ok=True)

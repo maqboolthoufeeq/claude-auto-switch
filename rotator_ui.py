@@ -34,7 +34,7 @@ from rotator import (
 )
 import shared_mode
 from shared_mode import old_vault_service, previous_vault_service, shared_env, shared_lock, state_read, state_save, vault_delete, vault_service
-from platform_runtime import choose_folder, interrupt_process, process_options, private_directory
+from platform_runtime import choose_folder, interrupt_process, popen_detached, process_options, private_directory
 
 
 ASSETS = {
@@ -61,17 +61,10 @@ def save_dashboard_url(config_path: Path, url: str) -> Path:
     return path
 
 
-def open_dashboard(url: str) -> None:
-    """Open the dashboard without putting its token on a browser command line other local users can read."""
-    if sys.platform in ("darwin", "win32"):
-        webbrowser.open(url)  # macOS passes the URL to osascript on stdin; Windows hides other users' command lines
-        return
-    page = shared_mode.STATE_DIR / "open-dashboard.html"
-    private_directory(page.parent)
-    fd = os.open(page, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(f'<!doctype html><meta charset="utf-8"><script>location.replace({json.dumps(url)})</script>\n')
-    webbrowser.open(page.as_uri())
+def open_dashboard(code: str) -> None:
+    """Open the dashboard with a single-use code that the page exchanges for the token. The long-lived token never
+    goes on a browser command line (other local users can read those on Linux) or into browser history."""
+    webbrowser.open(f"http://127.0.0.1:{DASHBOARD_PORT}/#code={code}")
 
 
 class Dashboard:
@@ -85,12 +78,27 @@ class Dashboard:
         self.messages: deque[str] = deque(maxlen=100)
         self.status_cache: tuple[float, list[dict[str, object]]] | None = None
         self.status_generation = 0
+        self.stop_requested = False
+        self.link_codes: dict[str, float] = {}
         self.account_operation = False
         self.activity_lock = threading.Lock()
         self.activity_file = config_path.parent / ".shared-rotator" / "account-activity.json"
 
     def _config(self):
         return load_config(self.config_path)
+
+    def link_code(self) -> str:
+        """A code that opens this dashboard once, within two minutes."""
+        code = secrets.token_urlsafe(18)
+        with self.lock:
+            now = time.monotonic()
+            self.link_codes = {item: until for item, until in self.link_codes.items() if until > now}
+            self.link_codes[code] = now + 120
+        return code
+
+    def redeem(self, code: str) -> bool:
+        with self.lock:
+            return self.link_codes.pop(code, 0) > time.monotonic()
 
     def _invalidate_status(self) -> None:
         """Call with self.lock held whenever accounts or their sign-ins change."""
@@ -205,12 +213,14 @@ class Dashboard:
                 raise RotatorError("A task or sign-in is already running")
             self.messages.clear()
             self.last_exit_code = None
+            self.stop_requested = False
+            shared = kind.startswith("shared-")
             try:
-                process = subprocess.Popen(
+                process = (popen_detached if shared else subprocess.Popen)(
                     argv, cwd=self.config_path.parent, env=dict(env or os.environ, PYTHONIOENCODING="utf-8"),
                     stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace", bufsize=1, **process_options(),
+                    text=True, encoding="utf-8", errors="replace", bufsize=1, **({} if shared else process_options()),
                 )
             except OSError as exc:
                 raise RotatorError(f"Could not start {kind}: {exc}") from exc
@@ -233,14 +243,18 @@ class Dashboard:
                 self._record(line)
         code = process.wait()
         process.stdout.close()
-        if kind.startswith("login:") and code != 0:
+        with self.lock:
+            cancelled = kind.startswith("login:") and self.stop_requested and self.process is process
+        if cancelled:
+            self._record("Sign-in cancelled")
+        elif kind.startswith("login:") and code != 0:
             self._record("Sign-in failed. Try the account's login command in Terminal if the browser asks for a code.")
         if kind.startswith("login:") and code == 0:
             self._account_event(kind.split(":", 1)[1], "login", "Signed in through Switchboard")
         self._record(f"{kind.capitalize()} finished with exit code {code}")
         with self.lock:
             if self.process is process:
-                self.last_exit_code = code
+                self.last_exit_code = None if cancelled else code
                 self._invalidate_status()
 
     def start_task(self, project_text: str, task: str | None) -> None:
@@ -475,6 +489,7 @@ class Dashboard:
                 raise RotatorError("Nothing is running")
             if kind.startswith("shared-"):
                 raise RotatorError("Wait for the switching change to finish")
+            self.stop_requested = True
         # Claude exits 0 when a browser sign-in is interrupted, which would read as a successful sign-in.
         interrupt_process(process, force=kind.startswith("login:"))
         self._record("Stop requested")
@@ -488,7 +503,7 @@ class Dashboard:
                 process.wait()
                 return
             try:
-                interrupt_process(process)
+                interrupt_process(process, force=kind.startswith("login:"))
                 process.wait(timeout=10)
             except (ProcessLookupError, subprocess.TimeoutExpired):
                 if process.poll() is None:
@@ -595,9 +610,6 @@ class Dashboard:
         self._account_event(name, "settings", f"Usage threshold set to {percent:g}%")
 
 
-REQUEST_ERRORS = (RotatorError, ValueError, TypeError, OSError, KeyError, RuntimeError, subprocess.TimeoutExpired)
-
-
 def make_handler(dashboard: Dashboard, token: str):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:
@@ -618,17 +630,31 @@ def make_handler(dashboard: Dashboard, token: str):
             self._headers("application/json; charset=utf-8", len(body), status)
             self.wfile.write(body)
 
-        def _authorized(self) -> bool:
-            host = self.headers.get("Host", "")
+        def _local(self) -> bool:
+            """Only this computer's own page: no other Host (DNS rebinding) and no other origin (cross-site)."""
             expected = f"127.0.0.1:{self.server.server_port}"
-            if host != expected or self.headers.get("X-Rotator-Token") != token:
-                self._send_json({"error": "Access denied"}, 403)
-                return False
             origin = self.headers.get("Origin")
-            if origin and origin != f"http://{expected}":
+            if self.headers.get("Host", "") != expected or (origin and origin != f"http://{expected}"):
                 self._send_json({"error": "Access denied"}, 403)
                 return False
             return True
+
+        def _authorized(self) -> bool:
+            if not self._local():
+                return False
+            if self.headers.get("X-Rotator-Token") != token:
+                self._send_json({"error": "Access denied"}, 403)
+                return False
+            return True
+
+        def _body(self) -> dict:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > 65536 or length < 2:
+                raise ValueError("Invalid request size")
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("Expected an object")
+            return data
 
         def do_GET(self) -> None:
             route = urlsplit(self.path)
@@ -655,20 +681,29 @@ def make_handler(dashboard: Dashboard, token: str):
                     self._send_json(dashboard.shared_status())
                 else:
                     self._send_json({"error": "Not found"}, 404)
-            except REQUEST_ERRORS as exc:
+            except Exception as exc:  # any failure is a JSON reply, never a dropped connection
                 self._send_json({"error": str(exc)}, 400)
 
         def do_POST(self) -> None:
+            route = urlsplit(self.path).path
+            if route == "/api/redeem":  # trades a single-use link code for the token, so it cannot ask for the token
+                if not self._local():
+                    return
+                try:
+                    code = self._body().get("code")
+                    ok = isinstance(code, str) and dashboard.redeem(code)
+                except Exception:
+                    ok = False
+                self._send_json({"token": token} if ok else {"error": "This link was already used or has expired"},
+                                200 if ok else 403)
+                return
             if not self._authorized():
                 return
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if length > 65536 or length < 2:
-                    raise ValueError("Invalid request size")
-                data = json.loads(self.rfile.read(length))
-                if not isinstance(data, dict):
-                    raise ValueError("Expected an object")
-                route = urlsplit(self.path).path
+                data = self._body()
+                if route == "/api/link-code":
+                    self._send_json({"code": dashboard.link_code()})
+                    return
                 if route == "/api/run":
                     dashboard.start_task(str(data.get("project", "")), str(data.get("task", "")))
                 elif route == "/api/resume":
@@ -701,7 +736,7 @@ def make_handler(dashboard: Dashboard, token: str):
                     self._send_json({"error": "Not found"}, 404)
                     return
                 self._send_json({"ok": True})
-            except REQUEST_ERRORS as exc:
+            except Exception as exc:  # any failure is a JSON reply, never a dropped connection
                 self._send_json({"error": str(exc)}, 400)
 
     return Handler
@@ -709,20 +744,25 @@ def make_handler(dashboard: Dashboard, token: str):
 
 def ensure_monitor(dashboard: Dashboard, config_path: Path) -> None:
     """Point the monitor and the limit hook at this install. It can wait for a running usage read, so not inline."""
+    if "_npx" in Path(__file__).resolve().parts:
+        return  # a temporary npx copy must not take over the installed copy's monitor (shared_mode refuses too)
     try:
         state = json.loads(shared_mode.STATE_FILE.read_text(encoding="utf-8"))
         if not (isinstance(state, dict) and state.get("enabled")):
             return
-        proc = subprocess.run(
+        # Its own session, never killed: Ctrl+C or a timeout between stopping and starting the monitor would leave
+        # switching on with no monitor. It may wait for a /usage read or a switch to finish first.
+        proc = popen_detached(
             [sys.executable, str(BASE_DIR / "shared_mode.py"), "--config", str(config_path), "ensure-monitor"],
-            capture_output=True, text=True, timeout=180, check=False,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )
+        _, stderr = proc.communicate()
         if proc.returncode == 0:
             return
-        detail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        detail = (stderr or "").strip().splitlines()[-1:] or [""]
+    except (OSError, ValueError) as exc:
         detail = [str(exc)]
-    error = f"The session usage monitor could not start. Turn switching off and on to retry. {detail[0]}".strip()
+    error = f"{shared_mode.MONITOR_ERROR} Turn switching off and on to retry. {detail[0]}".strip()
     dashboard._record(error)
     shared_mode.record_error(RotatorError(error))
 
@@ -751,7 +791,7 @@ def main() -> int:
     print(f"Rotator dashboard: {url}", flush=True)
     print("Keep this window open while a task runs. Press Ctrl+C to close the dashboard.", flush=True)
     if not args.no_browser:
-        open_dashboard(url)
+        open_dashboard(dashboard.link_code())
     def stop_on_signal(signum, frame):
         raise KeyboardInterrupt
 

@@ -8,12 +8,14 @@ const path = require('path');
 
 const PKG = path.resolve(__dirname, '..');
 const VERSION = require(path.join(PKG, 'package.json')).version;
-const HOME = path.resolve(process.env.CSWITCH_HOME || path.join(os.homedir(), '.cswitch'));
+// Expand a leading ~ the way Python's expanduser() does, so Node and the app agree on the folder.
+const RAW_HOME = (process.env.CSWITCH_HOME || '').replace(/^~(?=$|[\\/])/, os.homedir());
+const HOME = path.resolve(RAW_HOME || path.join(os.homedir(), '.cswitch'));
 const WIN = process.platform === 'win32';
 
 // command -> [script, replacement command]. Anything else runs the dashboard launcher.
 const COMMANDS = {
-  dashboard: ['rotator_ui.py'],
+  dashboard: ['launch.py'],
   init: ['rotator.py', 'init'],
   login: ['rotator.py', 'login'],
   accounts: ['rotator.py', 'status'],
@@ -36,6 +38,7 @@ const USAGE = `cswitch ${VERSION} - switch between Claude Code accounts automati
 Usage:
   cswitch                      open the local dashboard (starts it if needed)
   cswitch dashboard [--no-browser]
+  cswitch init                 create the config in the data folder (plain cswitch does this too)
   cswitch login <account>      sign in one profile through Claude's browser login
   cswitch accounts             show each profile's login status
   cswitch setup                prepare signed-in profiles for shared switching
@@ -77,10 +80,12 @@ function ensureVenv([cmd, pre]) {
   const wanted = [VERSION, ...deps].join('\n');
   let current = '';
   try { current = fs.readFileSync(stamp, 'utf8'); } catch (_) { /* first run */ }
-  if (fs.existsSync(python) && current === wanted) return python;
+  // Reuse it only while it still works: an OS upgrade can replace or remove the Python it was made from.
+  const healthy = fs.existsSync(python) && works(python, ['-c', 'import pyte']);
+  if (healthy && current === wanted) return python;
   console.error(`cswitch: preparing a Python environment in ${venv} (one time)`);
   const steps = [
-    [cmd, [...pre, '-m', 'venv', venv], 'Could not create a Python virtual environment. Install uv, or on Debian/Ubuntu run: sudo apt install python3-venv'],
+    [cmd, [...pre, '-m', 'venv', ...(healthy ? [] : ['--clear']), venv], 'Could not create a Python virtual environment. Install uv, or on Debian/Ubuntu run: sudo apt install python3-venv'],
     [python, ['-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', ...deps], 'Could not install Python dependencies. Check your network connection, or install uv instead.'],
   ];
   for (const [stepCmd, args, failure] of steps) {
