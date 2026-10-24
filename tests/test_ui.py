@@ -158,6 +158,28 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(post("/api/redeem", {"code": code}), (200, {"token": "test-token"}))
         self.assertEqual(post("/api/redeem", {"code": code})[0], 403)  # single use
 
+    def test_link_codes_expire(self):
+        code = self.dashboard.link_code()
+        later = time.monotonic() + 121
+        with patch.object(rotator_ui.time, "monotonic", return_value=later):
+            self.assertFalse(self.dashboard.redeem(code))
+
+    def test_closing_the_dashboard_force_stops_a_pending_sign_in(self):
+        # Claude exits 0 on Ctrl+C, which would record a sign-in that never happened.
+        process = Mock()
+        process.poll.return_value = None
+        self.dashboard.process, self.dashboard.process_kind = process, "login:account-1"
+        with patch.object(rotator_ui, "interrupt_process") as interrupt:
+            self.dashboard.shutdown()
+        interrupt.assert_called_once_with(process, force=True)
+        self.dashboard.process = None
+
+    def test_a_temporary_npx_copy_never_takes_over_the_monitor(self):
+        with patch.object(rotator_ui, "__file__", "/home/u/.npm/_npx/0a1b/node_modules/cswitch/rotator_ui.py"), \
+             patch.object(rotator_ui, "popen_detached") as start:
+            rotator_ui.ensure_monitor(self.dashboard, self.config)
+        start.assert_not_called()
+
     def test_cancelled_sign_in_is_not_reported_as_a_failure(self):
         self.dashboard._start([sys.executable, "-c", "import time; time.sleep(30)"], "login:account-1")
         self.dashboard.stop()

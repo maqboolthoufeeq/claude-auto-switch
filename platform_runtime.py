@@ -131,7 +131,7 @@ def popen_detached(argv: list[str], **kwargs) -> subprocess.Popen:
 @contextmanager
 def other_install_locks(state_dir: Path | None, wait: float = 120):
     """Hold another install's switch and reader locks while its monitor is stopped, so a switch or a /usage read in
-    progress is never cut short. Give up after `wait` seconds rather than deadlock with an install retiring this one."""
+    progress is never cut short. Raise after `wait` seconds rather than deadlock with an install retiring this one."""
     with ExitStack() as held:
         if state_dir is not None and state_dir.is_dir():
             deadline = time.monotonic() + wait
@@ -141,8 +141,8 @@ def other_install_locks(state_dir: Path | None, wait: float = 120):
                         held.enter_context(file_lock(state_dir / name, blocking=False))
                         break
                     except BlockingIOError:
-                        if time.monotonic() > deadline:
-                            break
+                        if time.monotonic() > deadline:  # stopping it now could cut a login short
+                            raise RotatorError("Another Switchboard install is still switching accounts. Try again in a few minutes.")
                         time.sleep(0.5)
         yield
 

@@ -78,12 +78,50 @@ class PlatformTests(unittest.TestCase):
                 if argv[:3] == ["systemctl", "--user", "disable"]:
                     events.append("stopped")
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(root / "config")}), \
-                 patch.object(background_monitor.sys, "platform", "linux"), \
+                 patch.object(background_monitor, "sys", SimpleNamespace(platform="linux")), \
                  patch.object(background_monitor.subprocess, "run", side_effect=run):
                 background_monitor.retire_others(root / "new" / "rotator.json", root / "new" / ".shared-rotator")
             worker.join(5)
             self.assertEqual(events, ["switch done", "stopped"])
             self.assertFalse(stale.exists())
+
+    def test_another_install_still_switching_is_not_stopped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            other = Path(folder)
+            held, release = threading.Event(), threading.Event()
+            def switching():
+                with platform_runtime.file_lock(other / "lock"):
+                    held.set()
+                    release.wait(5)
+            worker = threading.Thread(target=switching)
+            worker.start()
+            held.wait(5)
+            try:
+                with self.assertRaisesRegex(RotatorError, "still switching"):
+                    with platform_runtime.other_install_locks(other, wait=0.3):
+                        self.fail("stopped another install's monitor in the middle of its switch")
+            finally:
+                release.set()
+                worker.join(5)
+
+    def test_state_dir_of_skips_this_installs_own_folder(self):
+        own = Path(tempfile.gettempdir()) / "app" / ".shared-rotator"
+        self.assertIsNone(background_monitor.state_dir_of(["--config", str(own.parent / "rotator.json")], own))
+        self.assertEqual(background_monitor.state_dir_of(["x", "--config", "/old/rotator.json"], own),
+                         Path("/old/rotator.json").parent / ".shared-rotator")
+
+    def test_detached_start_on_windows_falls_back_when_the_job_forbids_breakaway(self):
+        calls = []
+        def popen(argv, **kwargs):
+            calls.append(kwargs["creationflags"])
+            if len(calls) == 1:
+                raise OSError(5, "Access is denied")
+            return "started"
+        flags = {"CREATE_NEW_PROCESS_GROUP": 0x200, "CREATE_NO_WINDOW": 0x8000000, "CREATE_BREAKAWAY_FROM_JOB": 0x1000000}
+        with patch.object(platform_runtime, "sys", SimpleNamespace(platform="win32")), \
+             patch.multiple(platform_runtime.subprocess, create=True, Popen=popen, **flags):
+            self.assertEqual(platform_runtime.popen_detached(["claude", "auth", "login"]), "started")
+        self.assertEqual(calls, [0x200 | 0x8000000 | 0x1000000, 0x200 | 0x8000000])
 
     def test_windows_json_save_retries_while_a_reader_has_the_file_open(self):
         with tempfile.TemporaryDirectory() as root:
@@ -110,6 +148,7 @@ class PlatformTests(unittest.TestCase):
             opener = MagicMock()
             opener.open.return_value.__enter__.return_value.read.return_value = b'{"code": "one-time"}'
             with patch.object(launch, "DATA_DIR", directory), \
+                 patch.dict(os.environ, {"http_proxy": "http://proxy.invalid:1", "HTTP_PROXY": "http://proxy.invalid:1"}), \
                  patch.object(launch.urllib.request, "build_opener", return_value=opener) as build, \
                  patch.object(launch, "open_dashboard") as browser, \
                  patch.object(launch, "dashboard_main") as start, \
@@ -328,7 +367,7 @@ class PlatformTests(unittest.TestCase):
              patch.object(session_usage.time, "monotonic", side_effect=lambda: next(counter)), \
              patch.object(session_usage.time, "sleep"), \
              patch.object(session_usage, "kill_windows_tree") as cleanup:
-            result = session_usage.read_session_usage("claude.exe", {})
+            result = session_usage.read_session_usage("claude.exe", {"CLAUDE_CONFIG_DIR": tempfile.gettempdir()})
         self.assertEqual(result, (6.0, None, None))
         # /usage, then Esc and /exit: Claude is asked to quit before anything is killed.
         self.assertEqual([c.args[0] for c in process.write.call_args_list], ["/usage\r", "\x1b", "/exit\r"])

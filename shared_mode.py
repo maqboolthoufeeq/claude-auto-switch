@@ -22,8 +22,8 @@ import time
 from typing import Any
 
 from rotator import (
-    BASE_DIR, DATA_DIR, Account, Config, ENV_REMOVE, RotatorError, atomic_json,
-    claude_binary, load_config, usage_percent,
+    BASE_DIR, DATA_DIR, Account, Config, RotatorError, atomic_json,
+    child_env, claude_binary, load_config, usage_percent,
 )
 from session_usage import read_session_usage
 from platform_runtime import (file_lock, interrupt_process, other_install_locks, popen_detached, private_directory,
@@ -59,7 +59,7 @@ def require_macos() -> None:
 
 
 def base_env() -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key not in ENV_REMOVE}
+    env = child_env()
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 
@@ -261,7 +261,7 @@ def keychain_write(service: str, secret: str) -> None:
         root_attempted = True
         _keychain_item_write(service, base64.b64encode(json.dumps(manifest).encode()))
         committed = True
-    except RotatorError:
+    except BaseException:  # also Ctrl+C: never leave a manifest pointing at chunks the finally block deletes
         if root_attempted:
             try:
                 if previous:
@@ -516,9 +516,10 @@ def sync_current(config: Config, config_path: Path, state: dict[str, Any]) -> st
         if str(exc) != NOT_SIGNED_IN:
             raise
         try:
-            claude_credential(None)
+            credential_parts(claude_credential(None))
         except RotatorError:
-            return None  # signed out with nothing stored: the next login can only help
+            state["current"] = None  # signed out with no usable login stored: nothing to keep, a login can only help
+            return None
         if state.get("current") is None:
             return None
         raise
@@ -546,16 +547,21 @@ def claude_login(binary: str, raw: str) -> bool:
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
         raise RotatorError(f"Claude login could not run: {exc}") from exc
-    timeout = 90
+    refresh_lock = Path.home() / ".claude" / ".oauth_refresh.lock"  # shared_env() has no CLAUDE_CONFIG_DIR
+    timeout, deadline = 90, None
     while proc.returncode is None:
         try:
             proc.wait(timeout)
         except KeyboardInterrupt:
             pass  # let it finish; switch() then verifies the login or rolls it back
         except subprocess.TimeoutExpired:
-            interrupt_process(proc)  # ask it to stop, then wait for it to finish cleanly
-            timeout = None
-    if timeout is None:
+            if deadline is None:
+                interrupt_process(proc)  # ask it to stop, then give it a minute to finish cleanly
+                deadline, timeout = time.monotonic() + 60, 5
+            elif time.monotonic() > deadline and not refresh_lock.exists():
+                # Stuck for minutes with no refresh in flight. It holds shared_lock for every switch, so end it.
+                interrupt_process(proc, force=True)
+    if deadline is not None:
         raise RotatorError("Claude login did not finish within 90 seconds")
     return proc.returncode == 0
 
@@ -572,7 +578,11 @@ def switch(config: Config, config_path: Path, state: dict[str, Any], target: Acc
     if state.get("current") == target.name:  # the shared login already was this account
         state_save(state)
         return state
-    raw = vault_read(vault_service(config_path, target))
+    try:
+        raw = vault_read(vault_service(config_path, target))
+    except RotatorError:
+        mark_limited(state, target.name, time.time() + 15 * 60)  # the next tick or report tries another account
+        raise
     logged_in = mismatch = False
     try:
         # Claude Code performs the exchange and writes its own shared Keychain login.
@@ -583,14 +593,16 @@ def switch(config: Config, config_path: Path, state: dict[str, Any], target: Acc
         logged_in = True
         actual = auth_identity(binary, shared_env())
         if actual != expected:
-            mismatch = True
-            raise RotatorError(f"Account verification failed: expected {expected}, got {actual}")
+            mismatch = True  # its saved login belongs to another account: skip it until it is prepared again
+            error = f"Account verification failed: expected {expected}, got {actual}"
+            state.setdefault("login_errors", {})[target.name] = error
+            raise RotatorError(error)
         fresh = claude_credential(None)
         credential_parts(fresh)
         keychain_write(vault_service(config_path, target), fresh)
     except RotatorError as exc:
         try:
-            live = None if mismatch else auth_identity(binary, shared_env())
+            live = actual if mismatch else auth_identity(binary, shared_env())
         except RotatorError:
             live = None
         if not mismatch and (logged_in or live == expected):
@@ -599,15 +611,17 @@ def switch(config: Config, config_path: Path, state: dict[str, Any], target: Acc
                 credential_parts(fresh)
                 keychain_write(vault_service(config_path, target), fresh)
             except RotatorError:
-                pass
-        if previous_raw and live != state["identities"].get(state.get("current")):
-            try:  # put the previous login back; skipped when it never left, which would only spend its token
-                claude_login(binary, previous_raw)
-            except RotatorError:
-                pass
-        state["last_error"] = str(exc)
-        state_save(state)
-        raise
+                pass  # sync_current() saves the live login before the next switch away
+        if live != expected:
+            if previous_raw and live != state["identities"].get(state.get("current")):
+                try:  # put the previous login back; skipped when it never left, which would only spend its token
+                    claude_login(binary, previous_raw)
+                except RotatorError:
+                    pass
+            state["last_error"] = str(exc)
+            state_save(state)
+            raise
+        # The target is live and verified, so the switch happened. Rolling it back would only spend tokens.
     previous = state.get("current")
     state["current"] = target.name
     state["last_error"] = None
@@ -917,6 +931,9 @@ def check_usage(config_path: Path) -> None:
                     state["last_error"] = None
             state_save(state)
             return
+        if time.time() - float(state.get("limit_attempt_at", 0)) < LIMIT_REPORT_GRACE:
+            state_save(state)
+            return  # an attempt just failed; give it the same pause as rate-limit reports get
         mark_limited(state, current, reset)
         target = next_account(config, state)
         if target is None:
@@ -927,6 +944,7 @@ def check_usage(config_path: Path) -> None:
             switch(config, config_path, state, target, f"{percent:g}% usage")
         except RotatorError as exc:
             state["last_error"] = str(exc)
+            state["limit_attempt_at"] = time.time()  # reports queued behind this attempt must not repeat it
             state_save(state)
 
 

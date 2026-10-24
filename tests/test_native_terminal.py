@@ -50,10 +50,11 @@ class NativeTerminalTests(unittest.TestCase):
                     def __getattr__(self, name):
                         return getattr(self.process, name)
                 with patch.dict(sys.modules, {"winpty": SimpleNamespace(PTY=TestPTY)}):
-                    result = read_session_usage("fake-claude.exe", dict(os.environ), timeout=15)
+                    result = read_session_usage("fake-claude.exe", dict(os.environ, CLAUDE_CONFIG_DIR=root), timeout=15)
             else:
                 binary = write_executable(path, PROGRAM)
-                result = read_session_usage(str(binary), dict(os.environ), timeout=15)
+                # Its own config folder: the reader must not wait on the developer's real ~/.claude refresh lock.
+                result = read_session_usage(str(binary), dict(os.environ, CLAUDE_CONFIG_DIR=root), timeout=15)
             self.assertEqual(result, (6.0, None, None))
 
 

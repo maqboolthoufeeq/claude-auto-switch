@@ -84,8 +84,10 @@ function ensureVenv([cmd, pre]) {
   const healthy = fs.existsSync(python) && works(python, ['-c', 'import pyte']);
   if (healthy && current === wanted) return python;
   console.error(`cswitch: preparing a Python environment in ${venv} (one time)`);
+  // A healthy venv only gets its packages updated: rebuilding it would overwrite the interpreter a running
+  // background monitor is using (Windows refuses, and every command would then fail).
   const steps = [
-    [cmd, [...pre, '-m', 'venv', ...(healthy ? [] : ['--clear']), venv], 'Could not create a Python virtual environment. Install uv, or on Debian/Ubuntu run: sudo apt install python3-venv'],
+    ...(healthy ? [] : [[cmd, [...pre, '-m', 'venv', '--clear', venv], 'Could not create a Python virtual environment. Install uv, or on Debian/Ubuntu run: sudo apt install python3-venv']]),
     [python, ['-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', ...deps], 'Could not install Python dependencies. Check your network connection, or install uv instead.'],
   ];
   for (const [stepCmd, args, failure] of steps) {

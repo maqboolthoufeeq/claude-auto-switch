@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import platform_runtime
 import shared_mode
 from rotator import Account, Config, RotatorError
 
@@ -101,6 +102,7 @@ class SharedModeTests(unittest.TestCase):
             self.keychain[shared_mode.keychain_service(account.config_dir)] = self.raw(n, 1)
         self.keychain[shared_mode.keychain_service(None)] = self.raw(1, 1)
         self.patchers = [
+            patch.dict(os.environ, {"HOME": str(self.root), "USERPROFILE": str(self.root)}),
             patch.object(shared_mode, "STATE_DIR", self.root / ".shared-rotator"),
             patch.object(shared_mode, "STATE_FILE", self.root / ".shared-rotator" / "state.json"),
             patch.object(shared_mode, "require_macos"),
@@ -148,6 +150,10 @@ class SharedModeTests(unittest.TestCase):
         self.current_identity = f"same@example.com|org-{account}"
         self.keychain[shared_mode.keychain_service(None)] = self.raw(account, version)
         return SimpleNamespace(returncode=0)
+
+    @staticmethod
+    def darwin():
+        return SimpleNamespace(platform="darwin", executable=sys.executable)
 
     def limit(self):
         with patch.object(shared_mode, "load_config", return_value=self.config):
@@ -265,17 +271,20 @@ class SharedModeTests(unittest.TestCase):
             shared_mode.switch(self.config, self.config_path, shared_mode.state_read(), self.accounts[1], "manual")
         self.assertEqual(shared_mode.state_read()["current"], "account-1")
 
-    def test_failed_target_credential_save_restores_shared_login(self):
+    def test_landed_login_stays_when_its_vault_copy_cannot_be_saved(self):
+        # Rolling back would throw away the only copy of the target's new refresh token.
         state = shared_mode.setup(self.config, self.config_path)
         def fail_target(service, value):
             if service == shared_mode.vault_service(self.config_path, self.accounts[1]):
                 raise RotatorError("Test storage interrupted")
             self.keychain_write(service, value)
         with patch.object(shared_mode, "keychain_write", side_effect=fail_target):
-            with self.assertRaises(RotatorError):
-                shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
-        self.assertEqual(self.current_identity, "same@example.com|org-1")
-        self.assertEqual(shared_mode.state_read()["current"], "account-1")
+            shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
+        self.assertEqual(self.current_identity, "same@example.com|org-2")
+        self.assertEqual(shared_mode.state_read()["current"], "account-2")
+        self.assertEqual(self.logins, ["refresh-2-1"])  # no rollback login
+        shared_mode.switch(self.config, self.config_path, shared_mode.state_read(), self.accounts[0], "manual")
+        self.assertIn("refresh-2-2", self.keychain[shared_mode.vault_service(self.config_path, self.accounts[1])])
 
     def test_rejected_login_is_skipped_until_prepared_again(self):
         state = shared_mode.setup(self.config, self.config_path)
@@ -306,7 +315,7 @@ class SharedModeTests(unittest.TestCase):
     def test_background_monitor_installs_without_shell_or_secrets(self):
         path = self.root / "LaunchAgents" / "switchboard.plist"
         with patch.object(shared_mode, "agent_path", return_value=("switchboard.test", path)), \
-             patch.object(shared_mode.sys, "platform", "darwin"), \
+             patch.object(shared_mode, "sys", self.darwin()), \
              patch.object(shared_mode.os, "getuid", return_value=1000, create=True), \
              patch.object(shared_mode.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
             shared_mode.install_agent(self.config_path)
@@ -444,11 +453,11 @@ class SharedModeTests(unittest.TestCase):
                     raise RotatorError("Could not verify Claude login: timed out")
             return self.auth_identity(binary, env)
         with patch.object(shared_mode, "auth_identity", side_effect=flaky):
-            with self.assertRaises(RotatorError):
-                shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
+            shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
         vault = shared_mode.vault_service(self.config_path, self.accounts[1])
         self.assertIn("refresh-2-2", self.keychain[vault])
-        self.assertEqual(self.current_identity, "same@example.com|org-1")
+        self.assertEqual(shared_mode.state_read()["current"], "account-2")  # verified on the second check
+        self.assertEqual(self.logins, ["refresh-2-1"])
 
     def test_setup_rebuilds_damaged_state(self):
         shared_mode.STATE_DIR.mkdir(parents=True)
@@ -475,6 +484,7 @@ class SharedModeTests(unittest.TestCase):
         self.assertIsNone(shared_mode.setup(self.config, self.config_path)["current"])
         with patch.object(shared_mode, "load_config", return_value=self.config), \
              patch.object(shared_mode, "install_hook") as install_hook, \
+             patch.object(shared_mode, "install_agent"), \
              patch("sys.argv", ["shared_mode.py", "--config", str(self.config_path), "enable"]):
             with self.assertRaisesRegex(RotatorError, r"switch <account>"):
                 shared_mode.main()
@@ -494,6 +504,7 @@ class SharedModeTests(unittest.TestCase):
         self.enabled_setup()
         cached = Path("/home/u/.npm/_npx/0a1b2c/node_modules/cswitch/shared_mode.py")
         with patch.object(shared_mode, "__file__", str(cached)), \
+             patch.object(shared_mode, "install_hook"), \
              patch.object(shared_mode, "install_agent") as install_agent, \
              patch("sys.argv", ["shared_mode.py", "--config", str(self.config_path), "ensure-monitor"]):
             with self.assertRaisesRegex(RotatorError, "npm install -g cswitch"):
@@ -528,7 +539,7 @@ class SharedModeTests(unittest.TestCase):
         stale.write_bytes(plistlib.dumps({"Label": stale.stem, "KeepAlive": True}))
         path = agents / "com.local.switchboard.shared-login.fedcba987654.plist"
         with patch.object(shared_mode, "agent_path", return_value=(path.stem, path)), \
-             patch.object(shared_mode.sys, "platform", "darwin"), \
+             patch.object(shared_mode, "sys", self.darwin()), \
              patch.object(shared_mode.os, "getuid", return_value=1000, create=True), \
              patch.object(shared_mode.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
             shared_mode.install_agent(self.config_path)
@@ -587,10 +598,27 @@ class SharedModeTests(unittest.TestCase):
                 raise RotatorError("Claude login did not finish within 90 seconds")
             return True
         with patch.object(shared_mode, "claude_login", side_effect=login):
-            with self.assertRaises(RotatorError):
-                shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
+            shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
         self.assertIn("refresh-2-2", self.keychain[shared_mode.vault_service(self.config_path, self.accounts[1])])
-        self.assertEqual(self.current_identity, "same@example.com|org-1")
+        self.assertEqual(shared_mode.state_read()["current"], "account-2")
+        self.assertEqual(len(calls), 1)  # one login for the switch, no rollback
+
+    def test_mismatch_does_not_replay_a_spent_token_over_the_previous_login(self):
+        # Another process refreshed account-1 and wrote it back over the new login: it is live already, with a
+        # newer token, so logging in again with the old one could only fail or revoke it.
+        state = shared_mode.setup(self.config, self.config_path)
+        def login_then_overwritten(argv, **kwargs):
+            result = self.run_claude(argv, **kwargs)
+            self.current_identity = "same@example.com|org-1"
+            self.keychain[shared_mode.keychain_service(None)] = self.raw(1, 5)
+            return result
+        with patch.object(shared_mode.subprocess, "Popen", side_effect=login_then_overwritten):
+            with self.assertRaisesRegex(RotatorError, "verification failed"):
+                shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
+        self.assertEqual(self.logins, ["refresh-2-1"])
+        saved = shared_mode.state_read()
+        self.assertEqual(saved["current"], "account-1")
+        self.assertIn("account-2", saved["login_errors"])
 
     def test_a_signed_out_shared_login_can_be_switched_back_in(self):
         state = shared_mode.setup(self.config, self.config_path)
@@ -645,6 +673,130 @@ class SharedModeTests(unittest.TestCase):
              patch("sys.argv", ["shared_mode.py", "--config", str(self.config_path), "ensure-monitor"]):
             shared_mode.main()
         self.assertIsNone(shared_mode.state_read()["last_error"])
+
+
+    def hold(self, lock, events, label):
+        """Hold `lock` on another thread until released; record `label` when done."""
+        held, release = threading.Event(), threading.Event()
+        def run():
+            with platform_runtime.file_lock(lock):
+                held.set()
+                release.wait(5)
+                events.append(label)
+        worker = threading.Thread(target=run)
+        worker.start()
+        held.wait(5)
+        threading.Timer(0.5, release.set).start()
+        self.addCleanup(worker.join, 5)
+
+    def test_monitor_restart_waits_for_a_running_usage_read(self):
+        shared_mode.STATE_DIR.mkdir(parents=True)
+        events = []
+        self.hold(shared_mode.STATE_DIR / "reader.lock", events, "read done")
+        path = self.root / "LaunchAgents" / "switchboard.plist"
+        def run(argv, **kwargs):
+            if argv[:2] == ["launchctl", "bootout"]:
+                events.append("stop")
+            return SimpleNamespace(returncode=0)
+        with patch.object(shared_mode, "agent_path", return_value=("switchboard.test", path)), \
+             patch.object(shared_mode, "sys", self.darwin()), \
+             patch.object(shared_mode.os, "getuid", return_value=1000, create=True), \
+             patch.object(shared_mode.subprocess, "run", side_effect=run):
+            shared_mode.install_agent(self.config_path)
+        self.assertEqual(events, ["read done", "stop"])
+
+    def test_retiring_another_macos_install_waits_for_its_switch(self):
+        other = self.root / "old" / ".shared-rotator"
+        other.mkdir(parents=True)
+        agents = self.root / "LaunchAgents"
+        agents.mkdir()
+        stale = agents / "com.local.switchboard.shared-login.0123456789ab.plist"
+        stale.write_bytes(plistlib.dumps({"Label": stale.stem, "StandardOutPath": str(other / "watch.log")}))
+        events = []
+        self.hold(other / "lock", events, "switch done")
+        def run(argv, **kwargs):
+            if argv[:2] == ["launchctl", "bootout"] and argv[-1] == str(stale):
+                events.append("stopped")
+            return SimpleNamespace(returncode=0)
+        path = agents / "com.local.switchboard.shared-login.fedcba987654.plist"
+        with patch.object(shared_mode, "agent_path", return_value=(path.stem, path)), \
+             patch.object(shared_mode, "sys", self.darwin()), \
+             patch.object(shared_mode.os, "getuid", return_value=1000, create=True), \
+             patch.object(shared_mode.subprocess, "run", side_effect=run):
+            shared_mode.install_agent(self.config_path)
+        self.assertEqual(events, ["switch done", "stopped"])
+
+    def test_signed_out_login_is_logged_in_even_for_the_account_state_calls_current(self):
+        state = shared_mode.setup(self.config, self.config_path)
+        self.current_identity = None  # /logout in a terminal
+        del self.keychain[shared_mode.keychain_service(None)]
+        shared_mode.switch(self.config, self.config_path, state, self.accounts[0], "manual")
+        self.assertEqual(self.logins, ["refresh-1-1"])
+        self.assertEqual(self.current_identity, "same@example.com|org-1")
+
+    def test_enable_refuses_while_signed_out_and_follows_a_login_to_a_prepared_account(self):
+        state = shared_mode.setup(self.config, self.config_path)
+        state["current"], state["last_error"] = None, shared_mode.MONITOR_ERROR + " earlier"
+        shared_mode.state_save(state)
+        argv = ["shared_mode.py", "--config", str(self.config_path), "enable"]
+        with patch.object(shared_mode, "load_config", return_value=self.config), \
+             patch.object(shared_mode, "install_hook"), patch.object(shared_mode, "install_agent"), \
+             patch("sys.argv", argv), patch("sys.stdout", new=io.StringIO()):
+            self.current_identity = None
+            with self.assertRaisesRegex(RotatorError, "not a prepared account"):
+                shared_mode.main()
+            self.current_identity = "same@example.com|org-2"  # /login with account-2
+            shared_mode.main()
+        state = shared_mode.state_read()
+        self.assertTrue(state["enabled"])
+        self.assertEqual(state["current"], "account-2")
+        self.assertIsNone(state["last_error"])
+
+    def test_monitor_follows_a_login_change_even_when_usage_is_unreadable(self):
+        self.enabled_setup()
+        self.current_identity = "same@example.com|org-2"
+        with patch.object(shared_mode, "read_session_usage", return_value=(None, "no screen", None)), \
+             patch.object(shared_mode, "load_config", return_value=self.config):
+            shared_mode.check_usage(self.config_path)
+        self.assertEqual(shared_mode.state_read()["current"], "account-2")
+
+    def test_an_unreadable_saved_login_rests_that_account_so_others_are_tried(self):
+        state = self.enabled_setup()
+        del self.keychain[shared_mode.vault_service(self.config_path, self.accounts[1])]
+        with self.assertRaises(RotatorError):
+            shared_mode.switch(self.config, self.config_path, state, self.accounts[1], "manual")
+        self.assertTrue(shared_mode.resting(state, "account-2", time.time()))
+        self.assertFalse(shared_mode.resting(state, "account-2", time.time() + 16 * 60))
+
+    def test_a_failed_monitor_switch_holds_off_reports_and_its_own_retries(self):
+        self.enabled_setup()
+        with patch.object(shared_mode, "claude_login",
+                          side_effect=RotatorError("Claude login did not finish within 90 seconds")) as login, \
+             patch.object(shared_mode, "read_session_usage", return_value=(97.0, None, None)), \
+             patch.object(shared_mode, "load_config", return_value=self.config):
+            shared_mode.check_usage(self.config_path)
+            self.limit()
+            shared_mode.check_usage(self.config_path)
+        self.assertEqual(login.call_count, 1)
+
+    def test_a_stuck_login_is_ended_once_no_refresh_is_running(self):
+        stuck = SimpleNamespace(returncode=None, pid=4242)
+        def wait(timeout=None):
+            if stuck.returncode is None:
+                raise subprocess.TimeoutExpired("claude", timeout)
+        stuck.wait = wait
+        signals = []
+        def interrupt(process, force=False):
+            signals.append(force)
+            if force:
+                process.returncode = -9
+        clock = iter(range(0, 100000, 30))
+        with patch.object(shared_mode, "popen_detached", return_value=stuck), \
+             patch.object(shared_mode, "interrupt_process", side_effect=interrupt), \
+             patch.object(shared_mode.time, "monotonic", side_effect=lambda: next(clock)):
+            with self.assertRaisesRegex(RotatorError, "did not finish"):
+                shared_mode.claude_login("/fake/claude", self.raw(2, 1))
+        self.assertEqual(signals, [False, True])
 
 
 if __name__ == "__main__":

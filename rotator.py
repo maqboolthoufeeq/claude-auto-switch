@@ -60,6 +60,7 @@ ENV_REMOVE = {
     "UV_PROJECT_ENVIRONMENT",
     "UV_RUN_RECURSION_DEPTH",
     "VIRTUAL_ENV",
+    "VIRTUAL_ENV_PROMPT",
 }
 
 
@@ -173,8 +174,19 @@ def load_config(path: Path, data: Any = None) -> Config:
     return Config(command, mode, max_runs, accounts)
 
 
-def profile_env(account: Account) -> dict[str, str]:
+def child_env() -> dict[str, str]:
+    """Environment for Claude and other child processes: no provider overrides and none of this app's own Python."""
     env = {key: value for key, value in os.environ.items() if key not in ENV_REMOVE}
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv:  # `uv run` (the npm launcher) puts the app's private interpreter first on PATH
+        own = os.path.normcase(os.path.join(venv, "Scripts" if sys.platform == "win32" else "bin"))
+        env["PATH"] = os.pathsep.join(part for part in env.get("PATH", "").split(os.pathsep)
+                                      if os.path.normcase(part) != own)
+    return env
+
+
+def profile_env(account: Account) -> dict[str, str]:
+    env = child_env()
     env["PYTHONIOENCODING"] = "utf-8"
     env["CLAUDE_CONFIG_DIR"] = str(account.config_dir)
     return env

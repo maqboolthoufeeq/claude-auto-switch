@@ -64,6 +64,9 @@ def save_dashboard_url(config_path: Path, url: str) -> Path:
 def open_dashboard(code: str) -> None:
     """Open the dashboard with a single-use code that the page exchanges for the token. The long-lived token never
     goes on a browser command line (other local users can read those on Linux) or into browser history."""
+    # ponytail: on a multi-user Linux machine another local user watching /proc could race the browser to this
+    # single-use code; a 0600 redirect file would close that, but snap-packaged browsers cannot open files in
+    # ~/.cswitch. Revisit if Switchboard is used on shared Linux hosts.
     webbrowser.open(f"http://127.0.0.1:{DASHBOARD_PORT}/#code={code}")
 
 

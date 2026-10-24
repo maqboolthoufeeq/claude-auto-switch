@@ -74,9 +74,10 @@ def retire_others(config_path: Path, state_dir: Path) -> None:
             if not re.fullmatch(r"switchboard-[0-9a-f]{12}", name) or name == own:
                 continue
             query = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                                    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); "
                                     "(Get-ScheduledTask -TaskName $env:SWITCHBOARD_TASK_NAME).Actions[0].Arguments"],
                                    env=dict(powershell_env(), SWITCHBOARD_TASK_NAME=name), capture_output=True,
-                                   text=True, errors="replace", timeout=20, check=False)
+                                   text=True, encoding="utf-8", errors="replace", timeout=20, check=False)
             found = re.search(r'--config\s+(?:"([^"]+)"|(\S+))', query.stdout or "")
             arguments = ["--config", found.group(1) or found.group(2)] if found else []
             with other_install_locks(state_dir_of(arguments, state_dir)):
